@@ -1,0 +1,64 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Article {
+  id                 String   @id @default(cuid())
+  slug               String   @unique
+  headline           String
+  headlineBn         String
+  takeaway           String
+  takeawayBn         String
+  summaryEn          String[] // 2-5 paragraphs
+  summaryBn          String[] // 2-5 paragraphs
+  category           String
+  source             String
+  sourceUrl          String   @unique
+  imageUrl           String?
+  imageCredit        String?
+  publishedAt        DateTime
+  readingTimeSeconds Int      @default(35)
+  isBreaking         Boolean  @default(false)
+  isTrending         Boolean  @default(false)
+  tags               String[]
+
+  // Duplicate-detection fingerprint of the source headline, so re-runs
+  // of the cron job never re-summarize or re-publish the same story.
+  fingerprint        String   @unique
+
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@index([category])
+  @@index([publishedAt])
+  @@index([isBreaking])
+  @@index([isTrending])
+}
+
+model WeatherSnapshot {
+  id               String   @id @default(cuid())
+  location         String
+  temperatureC     Float
+  condition        String
+  humidityPercent  Int
+  windKph          Float
+  alert            String?
+  fetchedAt        DateTime @default(now())
+
+  @@index([location])
+}
+
+model IngestLog {
+  id           String   @id @default(cuid())
+  feedName     String
+  itemsSeen    Int
+  itemsNew     Int
+  itemsSkipped Int
+  ranAt        DateTime @default(now())
+  errorMessage String?
+}

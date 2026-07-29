@@ -1,0 +1,54 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-ivory text-ink antialiased;
+    font-feature-settings: "kern" 1, "liga" 1;
+  }
+
+  ::selection {
+    background: #E8CBB8;
+    color: #2B2621;
+  }
+
+  :focus-visible {
+    outline: 2px solid #B5603C;
+    outline-offset: 3px;
+    border-radius: 4px;
+  }
+
+  .lang-bn {
+    @apply font-bengali-sans;
+    line-height: 1.9;
+    letter-spacing: 0;
+  }
+
+  .lang-bn.headline {
+    @apply font-bengali;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+@layer utilities {
+  .container-editorial {
+    @apply mx-auto w-full max-w-editorial px-5 sm:px-8;
+  }
+
+  .hairline {
+    @apply border-sand/60;
+  }
+}
