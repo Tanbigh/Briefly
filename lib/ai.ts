@@ -1,4 +1,6 @@
-import Anthropic from "@anthropic-ai/sdk";
+console.log("GEMINI_API_KEY =", process.env.GEMINI_API_KEY);
+
+import { GoogleGenAI } from "@google/genai";
 import type { Category } from "./types";
 
 /**
@@ -9,13 +11,13 @@ import type { Category } from "./types";
  * automatic pipeline in lib/data.ts stays easy to audit for copyright
  * safety: we only ever send the model a headline + a short
  * publisher-provided description, never a full scraped article body.
+ *
+ * Model access goes through the official Google Gemini SDK.
  */
 
-const client = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY
+const ai = new GoogleGenAI({
+  apiKey: process.env.GEMINI_API_KEY!,
 });
-
-const MODEL = "claude-sonnet-4-6";
 
 const CATEGORIES: Category[] = [
   "Breaking News",
@@ -97,14 +99,12 @@ Published: ${item.publishedAt}
 Headline: ${item.headline}
 Description: ${item.description}`;
 
-  console.log(`[briefly:ai] calling ${MODEL} for "${item.headline}"`);
+  console.log(`[briefly:ai] calling gemini-2.5-flash for "${item.headline}"`);
   let response;
   try {
-    response = await client.messages.create({
-      model: MODEL,
-      max_tokens: 1500,
-      system,
-      messages: [{ role: "user", content: user }]
+    response = await ai.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: `${system}\n\n${user}`,
     });
   } catch (err) {
     // Distinguish "the API call itself failed" (auth, rate limit, network,
@@ -115,10 +115,7 @@ Description: ${item.description}`;
     throw err;
   }
 
-  const text = response.content
-    .map((block) => (block.type === "text" ? block.text : ""))
-    .join("")
-    .trim();
+  const text = (response.text() ?? "").trim();
 
   const cleaned = text.replace(/^```json/i, "").replace(/```$/, "").trim();
 
@@ -144,5 +141,3 @@ Description: ${item.description}`;
     tags: Array.isArray(parsed.tags) ? parsed.tags : []
   };
 }
-
-

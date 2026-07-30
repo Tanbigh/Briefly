@@ -27,7 +27,7 @@ import { generateArticle } from "./ai";
  *     SEPARATELY, keyed by a fingerprint of its source+headline, for
  *     AI_CACHE_REVALIDATE_SECONDS (a few days). A story still sitting in
  *     the RSS feed 10 minutes from now reuses its already-generated
- *     summary/translation instead of re-billing the Anthropic API for
+ *     summary/translation instead of re-billing the OpenRouter API for
  *     identical work every cycle.
  *
  * There is nothing to seed and no migration to run. There is also no
@@ -40,7 +40,7 @@ const ARTICLE_LIST_REVALIDATE_SECONDS = 600; // 10 minutes — the site-wide ref
 const AI_CACHE_REVALIDATE_SECONDS = 60 * 60 * 24 * 3; // 3 days — per-article AI cache
 const RECENCY_WINDOW_MS = 48 * 60 * 60 * 1000; // ignore anything a feed returns older than this
 const MAX_ARTICLES = 60; // caps AI spend + page size per refresh cycle
-const AI_CONCURRENCY = 5; // parallel Anthropic calls per refresh
+const AI_CONCURRENCY = 5; // parallel OpenRouter calls per refresh
 
 const BREAKING_WINDOW_MS = 24 * 60 * 60 * 1000;
 const TRENDING_WINDOW_MS = 48 * 60 * 60 * 1000;
@@ -92,7 +92,7 @@ async function generateArticleCached(item: FeedItem, fp: string) {
   return cached();
 }
 
-/** Fixed-concurrency map so a heavy news day doesn't fire dozens of simultaneous Anthropic calls. */
+/** Fixed-concurrency map so a heavy news day doesn't fire dozens of simultaneous OpenRouter calls. */
 async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
   const results: R[] = new Array(items.length);
   let cursor = 0;

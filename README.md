@@ -10,7 +10,7 @@ it automatically — no manual posting, no translation, and **no database**.
 - **Next.js 14** (App Router) + **TypeScript**
 - **Tailwind CSS** — no component library, no CSS-in-JS
 - **rss-parser** for feed ingestion
-- **Anthropic Claude API** for summarization, Bengali rewriting, and categorization
+- **OpenRouter** (via the OpenAI SDK, model `google/gemma-3-27b-it:free`) for summarization, Bengali rewriting, and categorization
 - **Next.js Data Cache** (`unstable_cache`) — the *only* persistence layer
 
 No database, no ORM, no cron service, no GitHub Actions workflow. Nothing to
@@ -34,7 +34,7 @@ truth every route calls:
 - Each individual article's AI generation is cached *separately*, keyed by a
   fingerprint of its source + headline, for 3 days. A story still sitting in
   the RSS feed an hour from now reuses its already-generated summary and
-  translation instead of paying for a fresh Anthropic call every cycle.
+  translation instead of paying for a fresh OpenRouter call every cycle.
 - "Trending" is derived, not stored: a story reported by 2+ distinct trusted
   sources (matched by normalized headline) is treated as trending. This is
   an approximation (exact-phrase matching only) — there's no database of
@@ -56,7 +56,7 @@ app/                    Routes (App Router)
   api/debug/news/        Diagnostics: cached article stats + optional live feed check
 components/             Small, single-purpose React components
 lib/
-  ai.ts                 All Claude API calls (summarize, rewrite, categorize)
+  ai.ts                 All OpenRouter API calls (summarize, rewrite, categorize)
   rss.ts                Trusted-source registry + feed parsing
   data.ts               RSS -> AI -> cache pipeline (replaces the old DB read/write layer)
   site-data.ts          Static config: category list + placeholder weather content
@@ -66,7 +66,7 @@ lib/
 
 ```bash
 npm install
-cp .env.example .env      # fill in ANTHROPIC_API_KEY
+cp .env.example .env      # fill in OPENROUTER_API_KEY
 npm run dev
 ```
 
@@ -78,7 +78,7 @@ content live; every request after that (for 10 minutes) is served from cache.
 
 1. Push this repo to GitHub.
 2. Import it into Vercel — the Hobby (free) plan is sufficient.
-3. Add `ANTHROPIC_API_KEY` and `NEXT_PUBLIC_SITE_URL` as environment
+3. Add `OPENROUTER_API_KEY` and `NEXT_PUBLIC_SITE_URL` as environment
    variables in Vercel's project settings.
 4. Deploy.
 
@@ -95,7 +95,7 @@ refresh mechanism.
    Add `?live=true` to also fetch every trusted RSS feed right now,
    read-only, so you can see immediately whether the sources themselves
    are returning fresh items.
-2. **Check `ANTHROPIC_API_KEY`** is set in your deployment environment —
+2. **Check `OPENROUTER_API_KEY`** is set in your deployment environment —
    without it, RSS items can be fetched but every article's AI generation
    step fails, and if *all* of them fail, `getArticles()` throws rather
    than showing anything.
