@@ -6,40 +6,49 @@ import type { Config } from "tailwindcss";
  * instead of a fixed hex value. `.dark` in globals.css redefines the same
  * variable names to their dark-theme values, so toggling one class on
  * <html> re-themes every component that uses `bg-ivory`, `text-ink`, etc. —
- * without editing each component individually. The `rgb(var(...) / <alpha>)`
- * form preserves Tailwind's opacity-modifier syntax (e.g. `bg-ivory/90`).
+ * without editing each component individually.
+ *
+ * The `<alpha-value>` token below is a plain string, not a function —
+ * Tailwind substitutes it automatically at build time whenever an opacity
+ * modifier is used (e.g. `bg-ivory/90` → `rgb(var(--color-ivory) / 0.9)`,
+ * `bg-ivory` with no modifier → `rgb(var(--color-ivory) / 1)`). This is
+ * the officially documented way to back a Tailwind color with a CSS
+ * variable: https://tailwindcss.com/docs/customizing-colors#using-css-variables
+ *
+ * A previous version of this file used a function `({ opacityValue }) =>
+ * ...` to build the same string. That works at runtime, but the `Config`
+ * type's `colors` field isn't reliably typed to accept a function across
+ * Tailwind 3.x patch versions, which is what caused the production build
+ * to fail with a type error. Plain strings have no such issue — they're
+ * unambiguously valid under `RecursiveKeyValuePair<string, string>` — and
+ * produce byte-identical CSS output.
  */
-function withOpacity(varName: string) {
-  return ({ opacityValue }: { opacityValue?: string }) =>
-    opacityValue === undefined ? `rgb(var(${varName}))` : `rgb(var(${varName}) / ${opacityValue})`;
-}
-
 const config: Config = {
   darkMode: "class",
   content: ["./app/**/*.{ts,tsx}", "./components/**/*.{ts,tsx}"],
   theme: {
     extend: {
       colors: {
-        ivory: withOpacity("--color-ivory"),
-        beige: withOpacity("--color-beige"),
-        cream: withOpacity("--color-cream"),
-        peach: withOpacity("--color-peach"),
-        card: withOpacity("--color-card"),
-        "card-soft": withOpacity("--color-card-soft"),
+        ivory: "rgb(var(--color-ivory) / <alpha-value>)",
+        beige: "rgb(var(--color-beige) / <alpha-value>)",
+        cream: "rgb(var(--color-cream) / <alpha-value>)",
+        peach: "rgb(var(--color-peach) / <alpha-value>)",
+        card: "rgb(var(--color-card) / <alpha-value>)",
+        "card-soft": "rgb(var(--color-card-soft) / <alpha-value>)",
         terracotta: {
-          DEFAULT: withOpacity("--color-terracotta"),
-          soft: withOpacity("--color-terracotta-soft")
+          DEFAULT: "rgb(var(--color-terracotta) / <alpha-value>)",
+          soft: "rgb(var(--color-terracotta-soft) / <alpha-value>)"
         },
-        sand: withOpacity("--color-sand"),
-        gold: withOpacity("--color-gold"),
+        sand: "rgb(var(--color-sand) / <alpha-value>)",
+        gold: "rgb(var(--color-gold) / <alpha-value>)",
         brown: {
-          DEFAULT: withOpacity("--color-brown"),
-          deep: withOpacity("--color-brown-deep")
+          DEFAULT: "rgb(var(--color-brown) / <alpha-value>)",
+          deep: "rgb(var(--color-brown-deep) / <alpha-value>)"
         },
-        slateblue: withOpacity("--color-slateblue"),
-        ink: withOpacity("--color-ink"),
-        "ink-soft": withOpacity("--color-ink-soft"),
-        breaking: withOpacity("--color-breaking-bg")
+        slateblue: "rgb(var(--color-slateblue) / <alpha-value>)",
+        ink: "rgb(var(--color-ink) / <alpha-value>)",
+        "ink-soft": "rgb(var(--color-ink-soft) / <alpha-value>)",
+        breaking: "rgb(var(--color-breaking-bg) / <alpha-value>)"
       },
       fontFamily: {
         sans: ["var(--font-inter)", "system-ui", "sans-serif"],

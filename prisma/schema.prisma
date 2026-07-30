@@ -62,4 +62,11 @@ model IngestLog {
   itemsSkipped Int
   ranAt        DateTime @default(now())
   errorMessage String?
+
+  // Structured diagnostics: per-feed fetch results (name, ok/error, item
+  // count, error message) plus a breakdown of *why* items were skipped
+  // (missing fields, existing fingerprint, near-duplicate headline,
+  // generation error). Powers /api/debug/news. Nullable so old rows
+  // written before this field existed still read fine.
+  details      Json?
 }

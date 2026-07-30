@@ -1,5 +1,5 @@
 import crypto from "crypto";
-import { fetchAllTrustedFeeds, TRUSTED_SOURCES, type FeedItem } from "./rss";
+import { fetchAllTrustedFeeds, TRUSTED_SOURCES, type FeedItem, type FeedResult } from "./rss";
 import { generateArticle } from "./ai";
 import { prisma } from "./db";
 
@@ -29,6 +29,15 @@ export interface IngestSummary {
   itemsSeen: number;
   itemsNew: number;
   itemsSkipped: number;
+  /** Breakdown of *why* items were skipped — this is what makes a "0 new
+   *  articles" run debuggable instead of a black box. */
+  skipReasons: {
+    missingFields: number;
+    existingFingerprint: number;
+    nearDuplicateHeadline: number;
+    generationError: number;
+  };
+  feedResults: FeedResult[];
   errors: string[];
 }
 
@@ -44,12 +53,39 @@ export interface IngestSummary {
  * "is this a duplicate?" check can misfire, and a false "yes" silently
  * discards a genuinely new story with no visible error. Plain string
  * comparison can't do that.
+ *
+ * Every step logs to the console (visible in `npm run fetch-news` output
+ * and in the GitHub Actions run log) so a run that produces zero new
+ * articles can be diagnosed from the log alone: how many items came back
+ * per feed, how many were skipped and why, and how many AI/DB writes
+ * failed.
  */
 export async function runIngestPass(): Promise<IngestSummary> {
-  const items = await fetchAllTrustedFeeds();
-  const errors: string[] = [];
+  console.log(`[briefly] ingest pass starting at ${new Date().toISOString()}`);
+
+  const { items, feedResults } = await fetchAllTrustedFeeds();
+  const failedFeeds = feedResults.filter((f) => f.status === "error");
+  const errors: string[] = failedFeeds.map((f) => `feed:${f.name} — ${f.error}`);
+
+  console.log(
+    `[briefly] feeds: ${feedResults.length - failedFeeds.length}/${feedResults.length} ok, ` +
+      `${items.length} raw item(s) seen`
+  );
+  if (failedFeeds.length === feedResults.length) {
+    console.error(
+      "[briefly] every trusted feed failed this run — 0 items were fetched. " +
+        "This is a total pipeline outage, not a quiet news day."
+    );
+  }
+
   let itemsNew = 0;
   let itemsSkipped = 0;
+  const skipReasons = {
+    missingFields: 0,
+    existingFingerprint: 0,
+    nearDuplicateHeadline: 0,
+    generationError: 0
+  };
 
   const recentArticles = await prisma.article.findMany({
     select: { headline: true },
@@ -57,10 +93,12 @@ export async function runIngestPass(): Promise<IngestSummary> {
     take: 200
   });
   const recentNormalized = new Set(recentArticles.map((a: { headline: string }) => normalizeHeadline(a.headline)));
+  console.log(`[briefly] loaded ${recentArticles.length} recent headline(s) for dedup comparison`);
 
   for (const item of items) {
     if (!item.headline || !item.sourceUrl) {
       itemsSkipped++;
+      skipReasons.missingFields++;
       continue;
     }
 
@@ -68,8 +106,14 @@ export async function runIngestPass(): Promise<IngestSummary> {
     const normalized = normalizeHeadline(item.headline);
 
     const alreadyExists = await prisma.article.findUnique({ where: { fingerprint: fp } });
-    if (alreadyExists || recentNormalized.has(normalized)) {
+    if (alreadyExists) {
       itemsSkipped++;
+      skipReasons.existingFingerprint++;
+      continue;
+    }
+    if (recentNormalized.has(normalized)) {
+      itemsSkipped++;
+      skipReasons.nearDuplicateHeadline++;
       continue;
     }
 
@@ -109,11 +153,21 @@ export async function runIngestPass(): Promise<IngestSummary> {
 
       recentNormalized.add(normalized);
       itemsNew++;
+      console.log(`[briefly] inserted — [${item.source}] "${generated.headline}" (slug=${slug})`);
     } catch (err) {
-      errors.push(`${item.source} — ${item.headline}: ${(err as Error).message}`);
+      const message = (err as Error).message;
+      errors.push(`item:${item.source} — ${item.headline}: ${message}`);
+      skipReasons.generationError++;
       itemsSkipped++;
+      console.error(`[briefly] item FAILED — [${item.source}] "${item.headline}": ${message}`);
     }
   }
+
+  console.log(
+    `[briefly] ingest pass done — seen=${items.length} new=${itemsNew} skipped=${itemsSkipped} ` +
+      `(missingFields=${skipReasons.missingFields}, existingFingerprint=${skipReasons.existingFingerprint}, ` +
+      `nearDuplicateHeadline=${skipReasons.nearDuplicateHeadline}, generationError=${skipReasons.generationError})`
+  );
 
   await prisma.ingestLog.create({
     data: {
@@ -121,9 +175,10 @@ export async function runIngestPass(): Promise<IngestSummary> {
       itemsSeen: items.length,
       itemsNew,
       itemsSkipped,
-      errorMessage: errors.length ? errors.slice(0, 5).join(" | ") : null
+      errorMessage: errors.length ? errors.slice(0, 10).join(" | ") : null,
+      details: { feedResults, skipReasons }
     }
   });
 
-  return { itemsSeen: items.length, itemsNew, itemsSkipped, errors };
+  return { itemsSeen: items.length, itemsNew, itemsSkipped, skipReasons, feedResults, errors };
 }

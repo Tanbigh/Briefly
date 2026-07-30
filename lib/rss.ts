@@ -14,7 +14,13 @@ export const TRUSTED_SOURCES = [
   { name: "Google News - World", url: "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en", source: "Google News" }
 ];
 
+// Some feeds (Reuters, PIB) reject requests with no/unusual User-Agent
+// headers, which rss-parser doesn't set by default — that request then
+// rejects and, before this file was instrumented, vanished silently
+// inside Promise.allSettled with no log line anywhere.
 const parser = new Parser({
+  headers: { "User-Agent": "Mozilla/5.0 (compatible; BrieflyNewsBot/1.0; +https://briefly.news)" },
+  timeout: 15000,
   customFields: {
     item: [["media:content", "media"], ["media:thumbnail", "thumbnail"]]
   }
@@ -27,6 +33,16 @@ export interface FeedItem {
   source: string;
   publishedAt: string;
   imageUrl: string | null;
+}
+
+/** Per-feed outcome, used for logging and the /api/debug/news endpoint. */
+export interface FeedResult {
+  name: string;
+  url: string;
+  status: "ok" | "error";
+  itemCount: number;
+  error?: string;
+  durationMs: number;
 }
 
 /**
@@ -47,9 +63,50 @@ export async function fetchFeed(feed: (typeof TRUSTED_SOURCES)[number]): Promise
   }));
 }
 
-export async function fetchAllTrustedFeeds(): Promise<FeedItem[]> {
-  const results = await Promise.allSettled(TRUSTED_SOURCES.map(fetchFeed));
-  return results.flatMap((r) => (r.status === "fulfilled" ? r.value : []));
+/**
+ * Fetches every trusted feed in parallel and returns BOTH the combined
+ * items and a per-feed breakdown of what happened. Previously this used
+ * Promise.allSettled and threw away the "rejected" half entirely — a feed
+ * that started failing (dead URL, blocked User-Agent, timeout, changed
+ * XML shape) would just quietly stop contributing items forever, with
+ * nothing in any log to say so. That's now impossible: every feed
+ * failure is captured, logged, and surfaced to the ingest summary and
+ * IngestLog row.
+ */
+export async function fetchAllTrustedFeeds(): Promise<{ items: FeedItem[]; feedResults: FeedResult[] }> {
+  const feedResults: FeedResult[] = [];
+  const items: FeedItem[] = [];
+
+  await Promise.all(
+    TRUSTED_SOURCES.map(async (feed) => {
+      const start = Date.now();
+      try {
+        const feedItems = await fetchFeed(feed);
+        items.push(...feedItems);
+        feedResults.push({
+          name: feed.name,
+          url: feed.url,
+          status: "ok",
+          itemCount: feedItems.length,
+          durationMs: Date.now() - start
+        });
+        console.log(`[briefly] feed ok — ${feed.name}: ${feedItems.length} item(s) in ${Date.now() - start}ms`);
+      } catch (err) {
+        const message = (err as Error).message;
+        feedResults.push({
+          name: feed.name,
+          url: feed.url,
+          status: "error",
+          itemCount: 0,
+          error: message,
+          durationMs: Date.now() - start
+        });
+        console.error(`[briefly] feed FAILED — ${feed.name} (${feed.url}): ${message}`);
+      }
+    })
+  );
+
+  return { items, feedResults };
 }
 
 function stripHtml(input: string): string {

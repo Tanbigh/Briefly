@@ -100,19 +100,30 @@ would use. Every article links back to the original source with a
 
 ## Troubleshooting: "the site isn't showing new articles"
 
-If content looks frozen, check in this order:
-
-1. **GitHub Actions tab** — is the "Fetch News" workflow actually running every
-   10 minutes, and is it green? A red run almost always means
-   `DATABASE_URL` or `ANTHROPIC_API_KEY` isn't set (or has expired) as a
-   repository secret — the script now fails loudly and exits non-zero in
-   that case instead of silently doing nothing.
-2. **The `IngestLog` table** — each run writes a row with `itemsSeen`,
-   `itemsNew`, `itemsSkipped`, and any `errorMessage`. If `itemsNew` is
-   consistently 0 with no errors, there's simply no new news right now
-   (normal). If it's 0 *with* errors every run, something's broken
-   upstream (bad API key, DB unreachable, a feed URL that stopped working).
-3. **Page caching** — `article/[slug]` and `category/[category]` pages use
+1. **Hit `/api/debug/news`** (add `-H "Authorization: Bearer $CRON_SECRET"` if
+   `CRON_SECRET` is set): it returns the total article count, the 10 newest
+   articles with their publish dates, and the last 20 `IngestLog` rows —
+   each with items seen/inserted/skipped and a `details` field breaking
+   down *why* items were skipped (missing fields, already-published
+   fingerprint, near-duplicate headline, or a generation/DB error) and the
+   per-feed fetch result (ok + item count, or the exact error). Add
+   `?live=true` to also fetch every trusted feed right now, read-only, so
+   you can see immediately whether the sources themselves are returning
+   items (may be slow — see note in the route's comment about Vercel
+   Hobby's 10s limit).
+2. **GitHub Actions tab** — is the "Fetch News" workflow actually running
+   every 10 minutes, and is it green? Open a run's log: it now prints a
+   per-feed breakdown (`Reuters World News=12, BBC News=ERROR:timeout, ...`)
+   and a skip-reason breakdown on every run, so a 0-new run tells you
+   exactly why. A run where every feed fails is now itself treated as a
+   failed run (red X) — previously that case produced a *silent* green
+   checkmark with 0 new articles and no error, which was indistinguishable
+   from a genuinely quiet news day.
+3. **The `IngestLog` table** (or `/api/debug/news`) — if `itemsNew` is 0
+   with no per-feed errors, there's simply no new news right now (normal).
+   If it's 0 with feed errors every run, the RSS layer is broken (dead
+   feed URL, blocked User-Agent, timeout) — check `details.feedResults`.
+4. **Page caching** — `article/[slug]` and `category/[category]` pages use
    `revalidate = 120`, so new rows in the database should appear within two
    minutes without a redeploy. If you still see stale content after that,
    check your CDN/browser isn't hard-caching (a hard refresh should confirm).
