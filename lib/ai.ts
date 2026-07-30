@@ -17,6 +17,16 @@ const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY!,
 });
 
+if (!process.env.GEMINI_API_KEY) {
+  // Fail loudly and immediately at module load time instead of letting every
+  // single article generation fail later with a vague/misleading SDK error.
+  console.error(
+    "[briefly:ai] GEMINI_API_KEY is not set. Set it in your environment " +
+      "(.env locally, or your deployment platform's environment variables) — " +
+      "get a key at https://aistudio.google.com/apikey"
+  );
+}
+
 const CATEGORIES: Category[] = [
   "Breaking News",
   "India",
@@ -109,7 +119,12 @@ Description: ${item.description}`;
     // bad model id) from "the API responded but gave us unusable JSON"
     // below — these need different fixes and are logged separately so a
     // caller's generic catch block doesn't blur them together.
-    console.error(`[briefly:ai] API call FAILED for "${item.headline}": ${(err as Error).message}`);
+    const e = err as { message?: string; status?: number; code?: string; name?: string };
+    console.error(
+      `[briefly:ai] API call FAILED for "${item.headline}": ` +
+        `name=${e.name ?? "unknown"} status=${e.status ?? "n/a"} code=${e.code ?? "n/a"} ` +
+        `message=${e.message ?? String(err)}`
+    );
     throw err;
   }
 
@@ -118,6 +133,18 @@ Description: ${item.description}`;
     .join("") ?? "";
 
   const text = (candidateText || response.text || "").trim();
+
+  if (!text) {
+    const finishReason = response.candidates?.[0]?.finishReason ?? "unknown";
+    const promptBlockReason = response.promptFeedback?.blockReason ?? "none";
+    console.error(
+      `[briefly:ai] EMPTY response for "${item.headline}" — ` +
+        `finishReason=${finishReason} promptBlockReason=${promptBlockReason}`
+    );
+    throw new Error(
+      `Gemini returned an empty response (finishReason=${finishReason}, promptBlockReason=${promptBlockReason})`
+    );
+  }
 
   const cleaned = text.replace(/^```json/i, "").replace(/```$/, "").trim();
 
