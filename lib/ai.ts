@@ -92,9 +92,26 @@ function extractRetryDelayMs(err: unknown): number | null {
   }
 }
 
-const MAX_RATE_LIMIT_RETRIES = 5;
+// --- Retry policy for 429s -------------------------------------------------
+//
+// The Gemini API's own suggested RetryInfo.retryDelay for an exhausted
+// per-minute quota is often 30-60+ seconds. The caller of this module
+// (lib/data.ts) now owns its own short, explicit per-refresh time budget
+// and treats "this call didn't finish in time" as a normal, expected
+// outcome — the story is simply retried on the next refresh cycle. Given
+// that, letting a single call sleep for the API's full suggested delay,
+// for up to several retries, is pure waste: it can't help the current
+// refresh (which has already stopped waiting on it by the time the delay
+// elapses), it privately occupies a slot in the shared call queue above
+// for minutes, starving every other item in the same refresh, and Vercel's
+// serverless functions provide no guarantee that work continues running
+// after a response has been sent anyway. So retries here are kept few and
+// fast — just enough to absorb a single transient blip — rather than
+// mirroring the API's full backoff suggestion.
+const MAX_RATE_LIMIT_RETRIES = Number(process.env.GEMINI_MAX_RATE_LIMIT_RETRIES || 1);
+const MAX_RATE_LIMIT_RETRY_DELAY_MS = Number(process.env.GEMINI_MAX_RATE_LIMIT_RETRY_DELAY_MS || 3000);
 
-/** Calls Gemini through the shared throttle, retrying rate-limit (429) errors with the API's own suggested backoff. */
+/** Calls Gemini through the shared throttle, retrying rate-limit (429) errors with a small, capped backoff. */
 async function callGemini(params: Parameters<typeof ai.models.generateContent>[0], headline: string) {
   for (let attempt = 0; attempt <= MAX_RATE_LIMIT_RETRIES; attempt++) {
     try {
@@ -102,10 +119,12 @@ async function callGemini(params: Parameters<typeof ai.models.generateContent>[0
     } catch (err) {
       const status = (err as { status?: number }).status;
       if (status !== 429 || attempt === MAX_RATE_LIMIT_RETRIES) throw err;
-      const delayMs = extractRetryDelayMs(err) ?? 2 ** attempt * 1000;
+
+      const suggestedMs = extractRetryDelayMs(err) ?? 2 ** attempt * 1000;
+      const delayMs = Math.min(suggestedMs, MAX_RATE_LIMIT_RETRY_DELAY_MS);
       console.warn(
         `[briefly:ai] rate limited for "${headline}" — retrying in ${delayMs}ms ` +
-          `(attempt ${attempt + 1}/${MAX_RATE_LIMIT_RETRIES})`
+          `(capped from API-suggested ${suggestedMs}ms; attempt ${attempt + 1}/${MAX_RATE_LIMIT_RETRIES})`
       );
       await sleep(delayMs);
     }
