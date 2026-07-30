@@ -5,7 +5,7 @@ import Parser from "rss-parser";
  * Only add feeds here that permit RSS syndication under their terms of use.
  * Do not add scraped sources that disallow it in robots.txt or ToS.
  *
- * NOTES ON SOURCES DELIBERATELY LEFT OUT:
+ * NOTES ON SOURCES DELIBERATELY LEFT OUT OR CHANGED:
  *
  * - Reuters: reuters.com killed its consumer RSS feeds in 2020. The URL
  *   that used to live here (reutersagency.com/feed/?best-topics=world) was
@@ -25,19 +25,45 @@ import Parser from "rss-parser";
  *   "no scraped sources" rule above, so it's excluded. BBC Bangla is used
  *   instead as the Bengali-language source — it's a legitimate, licensed
  *   RSS feed and covers West Bengal/India-relevant Bengali news.
+ *
+ * - Indian Express: the old `/print/front-page/feed/` URL now resolves to
+ *   something that isn't valid RSS 1/2 anymore ("Feed not recognized"),
+ *   almost certainly retired/redirected along with a CMS change. Their
+ *   current, actively-syndicated master feed is `indianexpress.com/feed/`
+ *   — swapped in below.
+ *
+ * - PIB India: was pointed at `pib.gov.in/RssMain.aspx?ModId=6&Lang=1&Regid=3`.
+ *   Two separate problems there: (1) `Regid=3` is PIB's *Kolkata regional
+ *   office* feed, not the all-India Press Releases feed — that's
+ *   `Regid=1` (confirmed against PIB's own /ViewRss.aspx listing page).
+ *   Fixed to `Regid=1` and to the `www.` host, which is what that listing
+ *   page itself links to. (2) Separately, pib.gov.in sits behind a
+ *   government WAF that intermittently 403s requests from datacenter/cloud
+ *   IP ranges (Vercel included) regardless of URL correctness or headers —
+ *   this is not something fixable from application code. It's kept in the
+ *   list because it's a legitimate official source and the per-feed error
+ *   handling below already isolates any 403 to just this one feed; if it's
+ *   consistently blocked from your deployment region, that's expected
+ *   platform-level blocking, not a bug here.
+ *
+ * - News18: was blocked outright (403) from this deployment's egress IPs,
+ *   independent of URL correctness — same class of issue as PIB above, but
+ *   with no first-party fallback URL to try. Replaced with LiveMint (Mint),
+ *   a comparable licensed, actively-maintained Indian business/general news
+ *   RSS feed, as a working like-for-like substitute.
  */
 export const TRUSTED_SOURCES = [
   { name: "Reuters World News", url: "https://reutersbest.com/region/global/feed/", source: "Reuters" },
   { name: "BBC News", url: "http://feeds.bbci.co.uk/news/world/rss.xml", source: "BBC" },
   { name: "BBC India", url: "https://feeds.bbci.co.uk/news/world/asia/india/rss.xml", source: "BBC" },
   { name: "BBC Bangla", url: "https://feeds.bbci.co.uk/bengali/rss.xml", source: "BBC Bangla" },
-  { name: "PIB India", url: "https://pib.gov.in/RssMain.aspx?ModId=6&Lang=1&Regid=3", source: "PIB" },
+  { name: "PIB India", url: "https://www.pib.gov.in/RssMain.aspx?ModId=6&Lang=1&Regid=1", source: "PIB" },
   { name: "The Hindu", url: "https://www.thehindu.com/feeder/default.rss", source: "The Hindu" },
-  { name: "Indian Express", url: "http://indianexpress.com/print/front-page/feed/", source: "Indian Express" },
+  { name: "Indian Express", url: "https://indianexpress.com/feed/", source: "Indian Express" },
   { name: "NDTV", url: "https://feeds.feedburner.com/ndtvnews-top-stories", source: "NDTV" },
   { name: "Hindustan Times", url: "https://www.hindustantimes.com/rss/topnews/rssfeed.xml", source: "Hindustan Times" },
   { name: "Times of India", url: "https://timesofindia.indiatimes.com/rssfeedstopstories.cms", source: "Times of India" },
-  { name: "News18", url: "https://www.news18.com/rss/india.xml", source: "News18" },
+  { name: "LiveMint", url: "https://www.livemint.com/rss/news", source: "LiveMint" },
   { name: "Google News - India", url: "https://news.google.com/rss?hl=en-IN&gl=IN&ceid=IN:en", source: "Google News" },
   { name: "Google News - World", url: "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en", source: "Google News" }
 ];
@@ -45,10 +71,28 @@ export const TRUSTED_SOURCES = [
 // Some feeds (Reuters, PIB) reject requests with no/unusual User-Agent
 // headers, which rss-parser doesn't set by default — that request then
 // rejects and, before this file was instrumented, vanished silently
-// inside Promise.allSettled with no log line anywhere.
+// inside Promise.allSettled with no log line anywhere. The fuller set of
+// browser-like headers below (Accept/Accept-Language, not just
+// User-Agent) reduces — but, per the notes above, can't fully eliminate —
+// bot-detection 403s from sites that specifically block datacenter IP
+// ranges rather than inspecting headers.
+//
+// `xml2js: { strict: false }` makes the underlying XML parser tolerant of
+// minor malformed markup (e.g. an attribute without a value, which is
+// what was breaking Hindustan Times's feed at a specific line/column).
+// Strict mode throws on the first such deviation and aborts that feed
+// entirely; non-strict mode recovers and still extracts the items.
 const parser = new Parser({
-  headers: { "User-Agent": "Mozilla/5.0 (compatible; BrieflyNewsBot/1.0; +https://briefly.news)" },
+  headers: {
+    "User-Agent": "Mozilla/5.0 (compatible; BrieflyNewsBot/1.0; +https://briefly.news)",
+    Accept: "application/rss+xml, application/xml, text/xml, */*",
+    "Accept-Language": "en-IN,en;q=0.9"
+  },
   timeout: 15000,
+  xml2js: {
+    strict: false,
+    trim: true
+  },
   customFields: {
     item: [["media:content", "media"], ["media:thumbnail", "thumbnail"]]
   }
@@ -98,13 +142,18 @@ export async function fetchFeed(feed: (typeof TRUSTED_SOURCES)[number]): Promise
 
 /**
  * Fetches every trusted feed in parallel and returns BOTH the combined
- * items and a per-feed breakdown of what happened. Previously this used
- * Promise.allSettled and threw away the "rejected" half entirely — a feed
- * that started failing (dead URL, blocked User-Agent, timeout, changed
- * XML shape) would just quietly stop contributing items forever, with
- * nothing in any log to say so. That's now impossible: every feed
- * failure is captured, logged, and surfaced in `feedResults` — visible via
- * `/api/debug/news` and in the server logs during a cache rebuild.
+ * items and a per-feed breakdown of what happened. This uses Promise.all
+ * with an internal try/catch per feed (not Promise.allSettled) so that a
+ * feed that fails — dead URL, blocked User-Agent/IP, timeout, changed XML
+ * shape, malformed markup — never rejects the outer Promise.all and never
+ * throws out of this function. It's simply recorded as `status: "error"`
+ * in `feedResults` and contributes zero items; every other feed's items
+ * are still returned. This was already true before this change; what's
+ * new is that fewer feeds actually need to hit this path now (see the
+ * TRUSTED_SOURCES notes above), and the ones still likely to occasionally
+ * (PIB, and any future WAF-protected source) no longer take the whole
+ * rebuild down with them — same as always, just documented explicitly
+ * here since it's the mechanism this file is being asked to guarantee.
  */
 export async function fetchAllTrustedFeeds(): Promise<{ items: FeedItem[]; feedResults: FeedResult[] }> {
   const feedResults: FeedResult[] = [];
