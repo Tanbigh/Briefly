@@ -4,8 +4,10 @@ import { getArticles, getArticlesByCategory, searchArticles } from "@/lib/data";
 // Explicitly opt this route out of any static/CDN caching. It already
 // becomes dynamic implicitly (it reads `request.url`), but that's an
 // implementation detail of Next.js's heuristics — spelling it out here
-// means it stays fresh even if the route's internals change later, and
-// keeps this in sync with the same guarantee on /api/cron/fetch-news.
+// means it stays fresh even if the route's internals change later. The
+// underlying article list still comes from the cached `getArticles()` in
+// lib/data.ts, so this only controls whether *this route's response* is
+// cached, not whether RSS/AI is re-run per request.
 export const dynamic = "force-dynamic";
 
 export async function GET(request: NextRequest) {

@@ -1,4 +1,4 @@
-import { MOCK_WEATHER } from "@/lib/mock-data";
+import { WEATHER_SNAPSHOTS } from "@/lib/site-data";
 
 export const metadata = { title: "Weather" };
 export const revalidate = 300;
@@ -13,7 +13,7 @@ export default function WeatherPage() {
       </p>
 
       <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">
-        {MOCK_WEATHER.map((w) => (
+        {WEATHER_SNAPSHOTS.map((w) => (
           <div key={w.location} className="rounded-xl2 border border-sand/40 bg-card p-5 shadow-card">
             <p className="font-display text-lg font-semibold text-ink">{w.location}</p>
             <p className="mt-1 text-3xl font-semibold text-ink">{w.temperatureC}°C</p>

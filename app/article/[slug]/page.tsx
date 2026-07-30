@@ -1,21 +1,20 @@
 import type { Metadata } from "next";
 import Image from "next/image";
 import { notFound } from "next/navigation";
-import { getArticleBySlug, getArticles } from "@/lib/data";
+import { getArticleBySlug } from "@/lib/data";
 import { formatRelativeTime } from "@/lib/format";
 import BookmarkButton from "@/components/BookmarkButton";
 import ShareButton from "@/components/ShareButton";
 
-// Without this, a page that uses generateStaticParams is rendered once at
-// build time and never refreshed — new articles published after deploy
-// would never appear here. Revalidating every 2 minutes keeps it current
-// while still serving cached HTML most of the time (fast + cheap).
+// No generateStaticParams here on purpose: this is a database-free,
+// RSS-driven site, and generateStaticParams would run at `next build`
+// time — before the build has network access to RSS/the Anthropic API in
+// most CI setups, and before any of today's stories exist. Instead every
+// slug is rendered on demand (first visit) and then cached for
+// `revalidate` seconds, same as the other pages — fast for every
+// subsequent reader without requiring a build-time crawl.
 export const revalidate = 120;
-
-export async function generateStaticParams() {
-  const articles = await getArticles();
-  return articles.map((a) => ({ slug: a.slug }));
-}
+export const dynamicParams = true;
 
 export async function generateMetadata({ params }: { params: { slug: string } }): Promise<Metadata> {
   const article = await getArticleBySlug(params.slug);

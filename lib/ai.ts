@@ -6,8 +6,8 @@ import type { Category } from "./types";
  *
  * This module is the only place in the codebase that talks to the model.
  * Every function here is deliberately narrow (one job each) so the
- * automatic pipeline in scripts/fetch-news.ts stays easy to audit for
- * copyright safety: we only ever send the model a headline + a short
+ * automatic pipeline in lib/data.ts stays easy to audit for copyright
+ * safety: we only ever send the model a headline + a short
  * publisher-provided description, never a full scraped article body.
  */
 
@@ -109,8 +109,8 @@ Description: ${item.description}`;
   } catch (err) {
     // Distinguish "the API call itself failed" (auth, rate limit, network,
     // bad model id) from "the API responded but gave us unusable JSON"
-    // below — these need different fixes and were previously indistinguishable
-    // once they hit the generic catch in lib/ingest.ts.
+    // below — these need different fixes and are logged separately so a
+    // caller's generic catch block doesn't blur them together.
     console.error(`[briefly:ai] API call FAILED for "${item.headline}": ${(err as Error).message}`);
     throw err;
   }

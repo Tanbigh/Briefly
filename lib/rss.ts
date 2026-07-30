@@ -103,8 +103,8 @@ export async function fetchFeed(feed: (typeof TRUSTED_SOURCES)[number]): Promise
  * that started failing (dead URL, blocked User-Agent, timeout, changed
  * XML shape) would just quietly stop contributing items forever, with
  * nothing in any log to say so. That's now impossible: every feed
- * failure is captured, logged, and surfaced to the ingest summary and
- * IngestLog row.
+ * failure is captured, logged, and surfaced in `feedResults` — visible via
+ * `/api/debug/news` and in the server logs during a cache rebuild.
  */
 export async function fetchAllTrustedFeeds(): Promise<{ items: FeedItem[]; feedResults: FeedResult[] }> {
   const feedResults: FeedResult[] = [];

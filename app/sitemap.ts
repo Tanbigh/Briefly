@@ -1,6 +1,6 @@
 import type { MetadataRoute } from "next";
 import { getArticles } from "@/lib/data";
-import { CATEGORY_LIST } from "@/lib/mock-data";
+import { CATEGORY_LIST } from "@/lib/site-data";
 
 export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
   const base = process.env.NEXT_PUBLIC_SITE_URL ?? "https://briefly.news";

@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { CATEGORY_LIST } from "@/lib/mock-data";
+import { CATEGORY_LIST } from "@/lib/site-data";
 
 export default function CategoryNav({ active }: { active?: string }) {
   return (

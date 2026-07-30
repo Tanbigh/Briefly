@@ -3,92 +3,110 @@
 An AI-powered bilingual (English / Bengali) news briefing platform. Briefly reads
 headlines and short descriptions from trusted RSS feeds, generates a short AI
 summary in English, rewrites it as natural Bengali newspaper prose, and publishes
-it automatically — no manual posting or translation required.
+it automatically — no manual posting, no translation, and **no database**.
 
 ## Stack (intentionally minimal)
 
 - **Next.js 14** (App Router) + **TypeScript**
 - **Tailwind CSS** — no component library, no CSS-in-JS
-- **PostgreSQL** via **Prisma** (thin, typed data layer — no raw SQL scattered around)
 - **rss-parser** for feed ingestion
 - **Anthropic Claude API** for summarization, Bengali rewriting, and categorization
+- **Next.js Data Cache** (`unstable_cache`) — the *only* persistence layer
 
-No animation libraries, state-management libraries, or UI kits are used. Motion is
-plain CSS/Tailwind transitions only.
+No database, no ORM, no cron service, no GitHub Actions workflow. Nothing to
+provision, seed, or migrate.
+
+## How it works
+
+```
+RSS feeds → fetch latest items → dedupe → AI summary + Bengali translation
+          → Next.js Data Cache (10 min TTL) → homepage / category / search / RSS / sitemap
+```
+
+All of this lives in `lib/data.ts`. `getArticles()` is the single source of
+truth every route calls:
+
+- It's wrapped in `unstable_cache` with a 10-minute revalidation window, so
+  the site refreshes itself automatically — no cron job, no manual trigger,
+  nothing to "run." The first request after the window expires triggers a
+  fresh RSS + AI pass in the background; everyone else keeps getting the
+  last good list until that finishes (standard stale-while-revalidate).
+- Each individual article's AI generation is cached *separately*, keyed by a
+  fingerprint of its source + headline, for 3 days. A story still sitting in
+  the RSS feed an hour from now reuses its already-generated summary and
+  translation instead of paying for a fresh Anthropic call every cycle.
+- "Trending" is derived, not stored: a story reported by 2+ distinct trusted
+  sources (matched by normalized headline) is treated as trending. This is
+  an approximation (exact-phrase matching only) — there's no database of
+  clicks/views to rank on instead.
+- If every RSS feed fails, or every item fails AI generation, `getArticles()`
+  **throws**. There is no mock-data fallback anywhere in this codebase, in
+  any environment — a broken pipeline shows a visible error, never demo
+  content standing in for real news.
 
 ## Project structure
 
 ```
 app/                    Routes (App Router)
   page.tsx              Homepage
-  article/[slug]/       Full bilingual article view
+  article/[slug]/       Full bilingual article view (on-demand ISR, no build-time crawl)
   category/[category]/  Category listing
-  weather/, search/      Weather + search pages
+  weather/, search/      Weather (static placeholder) + search pages
   api/articles/          Read API (JSON)
-  api/cron/fetch-news/   Ingestion pipeline entrypoint (cron-triggered)
+  api/debug/news/        Diagnostics: cached article stats + optional live feed check
 components/             Small, single-purpose React components
 lib/
-  ai.ts                 All Claude API calls (summarize, rewrite, categorize, dedupe)
+  ai.ts                 All Claude API calls (summarize, rewrite, categorize)
   rss.ts                Trusted-source registry + feed parsing
-  ingest.ts             Ties RSS -> AI -> Postgres together
-  data.ts               Read layer (DB, falls back to mock data if no DATABASE_URL)
-  mock-data.ts          Sample bilingual articles for local preview
-prisma/schema.prisma    Database schema
-scripts/fetch-news.ts   CLI entrypoint for manual/GitHub Actions runs
+  data.ts               RSS -> AI -> cache pipeline (replaces the old DB read/write layer)
+  site-data.ts          Static config: category list + placeholder weather content
 ```
 
 ## Local setup
 
 ```bash
 npm install
-cp .env.example .env      # fill in DATABASE_URL and ANTHROPIC_API_KEY
-npm run db:push           # creates tables from prisma/schema.prisma
+cp .env.example .env      # fill in ANTHROPIC_API_KEY
 npm run dev
 ```
 
-Without `DATABASE_URL` set, the site still runs and renders using the bundled
-sample articles in `lib/mock-data.ts`, so you can preview the design immediately.
+There is nothing else to configure locally — no database to provision, no
+`db:push`, no seed script. The first page load fetches RSS and generates AI
+content live; every request after that (for 10 minutes) is served from cache.
 
-## Running the news pipeline
-
-Once `DATABASE_URL` and `ANTHROPIC_API_KEY` are set:
-
-```bash
-npm run fetch-news
-```
-
-This pulls every feed in `lib/rss.ts`, skips anything already published or that
-looks like a duplicate of an existing story, and asks Claude to generate a
-bilingual article for everything new.
-
-## Keeping it running automatically
-
-**GitHub Actions is the only scheduler** — `.github/workflows/fetch-news.yml`
-runs `npm run fetch-news` every 10 minutes.
-
-Vercel Cron is deliberately not used: it's a Vercel Pro feature, and the free
-Hobby plan only allows cron jobs to run once a day, which isn't frequent
-enough for a live news feed. Running the scheduler in GitHub Actions instead
-means:
-
-- It works on the Vercel Hobby plan with no restrictions.
-- It's not bound by Vercel's serverless function duration limits (Hobby caps
-  a single function invocation at 10 seconds — not enough time to summarize
-  and translate several new stories in one pass).
-
-To enable it:
+## Deploying (Vercel Hobby plan)
 
 1. Push this repo to GitHub.
-2. In the repo's **Settings → Secrets and variables → Actions**, add
-   `DATABASE_URL` and `ANTHROPIC_API_KEY` as repository secrets.
-3. That's it — the workflow starts running every 10 minutes automatically.
-   You can also trigger it manually from the **Actions** tab
-   (`workflow_dispatch`) to do an initial fetch right after deploying.
+2. Import it into Vercel — the Hobby (free) plan is sufficient.
+3. Add `ANTHROPIC_API_KEY` and `NEXT_PUBLIC_SITE_URL` as environment
+   variables in Vercel's project settings.
+4. Deploy.
 
-There's also a small `/api/cron/fetch-news` route in the app itself, but
-it's only there for manual/admin use (e.g. `curl` it once after deploying to
-seed the database) — it is not used for scheduling and is not required for
-the site to work.
+That's it. No Postgres, no `DATABASE_URL`, no GitHub Actions secrets, no
+cron configuration. `vercel.json` is intentionally empty — there is no
+scheduled job to configure; Next.js's own cache revalidation is the
+refresh mechanism.
+
+## Troubleshooting: "the site isn't showing new articles"
+
+1. **Hit `/api/debug/news`** (add `-H "Authorization: Bearer $CRON_SECRET"`
+   if `CRON_SECRET` is set): it reports the cached article count, the
+   newest article's timestamp, and how many are flagged breaking/trending.
+   Add `?live=true` to also fetch every trusted RSS feed right now,
+   read-only, so you can see immediately whether the sources themselves
+   are returning fresh items.
+2. **Check `ANTHROPIC_API_KEY`** is set in your deployment environment —
+   without it, RSS items can be fetched but every article's AI generation
+   step fails, and if *all* of them fail, `getArticles()` throws rather
+   than showing anything.
+3. **Cache window** — the article list refreshes at most every 10 minutes
+   (`ARTICLE_LIST_REVALIDATE_SECONDS` in `lib/data.ts`). If you just
+   deployed, the very first request populates the cache; that first
+   request will be slower (it's doing a live RSS + AI pass), everything
+   after is fast.
+4. **A visible error page instead of stale content** is expected behavior,
+   not a bug, if every RSS feed is down or every AI generation call fails —
+   see the console/function logs for exactly which feeds or calls failed.
 
 ## Copyright approach
 
@@ -97,50 +115,3 @@ the model a headline and the short public description/dek a publisher exposes
 in its own RSS feed for syndication — the same fields any news reader app
 would use. Every article links back to the original source with a
 "Read Original Article" button.
-
-## Troubleshooting: "the site isn't showing new articles"
-
-1. **Hit `/api/debug/news`** (add `-H "Authorization: Bearer $CRON_SECRET"` if
-   `CRON_SECRET` is set): it returns the total article count, the 10 newest
-   articles with their publish dates, and the last 20 `IngestLog` rows —
-   each with items seen/inserted/skipped and a `details` field breaking
-   down *why* items were skipped (missing fields, already-published
-   fingerprint, near-duplicate headline, or a generation/DB error) and the
-   per-feed fetch result (ok + item count, or the exact error). Add
-   `?live=true` to also fetch every trusted feed right now, read-only, so
-   you can see immediately whether the sources themselves are returning
-   items (may be slow — see note in the route's comment about Vercel
-   Hobby's 10s limit).
-2. **GitHub Actions tab** — is the "Fetch News" workflow actually running
-   every 10 minutes, and is it green? Open a run's log: it now prints a
-   per-feed breakdown (`Reuters World News=12, BBC News=ERROR:timeout, ...`)
-   and a skip-reason breakdown on every run, so a 0-new run tells you
-   exactly why. A run where every feed fails is now itself treated as a
-   failed run (red X) — previously that case produced a *silent* green
-   checkmark with 0 new articles and no error, which was indistinguishable
-   from a genuinely quiet news day.
-3. **The `IngestLog` table** (or `/api/debug/news`) — if `itemsNew` is 0
-   with no per-feed errors, there's simply no new news right now (normal).
-   If it's 0 with feed errors every run, the RSS layer is broken (dead
-   feed URL, blocked User-Agent, timeout) — check `details.feedResults`.
-4. **Page caching** — `article/[slug]` and `category/[category]` pages use
-   `revalidate = 120`, so new rows in the database should appear within two
-   minutes without a redeploy. If you still see stale content after that,
-   check your CDN/browser isn't hard-caching (a hard refresh should confirm).
-
-## Deploying (Vercel Hobby plan)
-
-1. Push this repo to GitHub.
-2. Import it into Vercel — the Hobby (free) plan is sufficient; nothing here
-   requires Pro.
-3. Add the environment variables from `.env.example` in Vercel's project
-   settings (`DATABASE_URL`, `ANTHROPIC_API_KEY`, `NEXT_PUBLIC_SITE_URL`,
-   `CRON_SECRET`).
-4. Provision a Postgres database (Vercel Postgres, Neon, or Supabase all work
-   on their free tiers) and run `npm run db:push` once against it.
-5. Deploy.
-6. Add `DATABASE_URL` and `ANTHROPIC_API_KEY` as GitHub Actions repository
-   secrets so the scheduler in step "Keeping it running automatically" above
-   can start publishing new stories every 10 minutes.
-
-No Vercel Cron configuration is needed or used anywhere in this project.
