@@ -89,6 +89,21 @@ export async function GET(request: NextRequest) {
         response.warning =
           "No IngestLog rows exist yet — the ingest pipeline (GitHub Actions / npm run fetch-news) has never completed a run against this database.";
       } else {
+        const lastRunDetails = recentIngestRuns[0]?.details as
+          | { feedResults?: { name: string; status: string; itemCount: number; newestItemAt: string | null }[] }
+          | null;
+        if (lastRunDetails?.feedResults) {
+          response.lastRunFeedFreshness = lastRunDetails.feedResults.map((f) => ({
+            name: f.name,
+            status: f.status,
+            itemCount: f.itemCount,
+            newestItemAt: f.newestItemAt,
+            newestItemHoursAgo: f.newestItemAt
+              ? Number(((Date.now() - new Date(f.newestItemAt).getTime()) / 3_600_000).toFixed(1))
+              : null
+          }));
+        }
+
         const zeroNewStreak = [];
         for (const run of recentIngestRuns) {
           if (run.itemsNew > 0) break;

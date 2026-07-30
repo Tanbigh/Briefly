@@ -97,12 +97,23 @@ Published: ${item.publishedAt}
 Headline: ${item.headline}
 Description: ${item.description}`;
 
-  const response = await client.messages.create({
-    model: MODEL,
-    max_tokens: 1500,
-    system,
-    messages: [{ role: "user", content: user }]
-  });
+  console.log(`[briefly:ai] calling ${MODEL} for "${item.headline}"`);
+  let response;
+  try {
+    response = await client.messages.create({
+      model: MODEL,
+      max_tokens: 1500,
+      system,
+      messages: [{ role: "user", content: user }]
+    });
+  } catch (err) {
+    // Distinguish "the API call itself failed" (auth, rate limit, network,
+    // bad model id) from "the API responded but gave us unusable JSON"
+    // below — these need different fixes and were previously indistinguishable
+    // once they hit the generic catch in lib/ingest.ts.
+    console.error(`[briefly:ai] API call FAILED for "${item.headline}": ${(err as Error).message}`);
+    throw err;
+  }
 
   const text = response.content
     .map((block) => (block.type === "text" ? block.text : ""))
@@ -110,7 +121,16 @@ Description: ${item.description}`;
     .trim();
 
   const cleaned = text.replace(/^```json/i, "").replace(/```$/, "").trim();
-  const parsed = JSON.parse(cleaned);
+
+  let parsed;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch (err) {
+    console.error(
+      `[briefly:ai] JSON parse FAILED for "${item.headline}" — raw response (first 300 chars): ${cleaned.slice(0, 300)}`
+    );
+    throw err;
+  }
 
   return {
     headline: parsed.headline,

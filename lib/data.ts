@@ -52,10 +52,20 @@ export async function getArticles(): Promise<Article[]> {
   if (hasDatabase) {
     try {
       return await fromDb();
-    } catch {
+    } catch (err) {
+      // IMPORTANT: this fallback is a prime suspect if the homepage ever
+      // looks "stuck" on old content — MOCK_ARTICLES is a static, unchanging
+      // array bundled at build time, so silently falling back to it here
+      // would look EXACTLY like "the site won't show new articles," with a
+      // fully working ingest pipeline. Logging loudly so this failure mode
+      // is never invisible again.
+      console.error(
+        `[briefly:frontend] DB read FAILED in getArticles() — falling back to MOCK_ARTICLES (site will show static sample data, not live articles): ${(err as Error).message}`
+      );
       return MOCK_ARTICLES;
     }
   }
+  console.warn("[briefly:frontend] DATABASE_URL not set — rendering from lib/mock-data.ts, not the database");
   return [...MOCK_ARTICLES].sort(
     (a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime()
   );

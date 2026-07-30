@@ -45,7 +45,8 @@ function feedResultToJson(result: FeedResult): Prisma.InputJsonObject {
     status: result.status,
     itemCount: result.itemCount,
     error: result.error ?? null,
-    durationMs: result.durationMs
+    durationMs: result.durationMs,
+    newestItemAt: result.newestItemAt ?? null
   };
 }
 
@@ -123,37 +124,71 @@ export async function runIngestPass(): Promise<IngestSummary> {
     generationError: 0
   };
 
-  const recentArticles = await prisma.article.findMany({
-    select: { headline: true },
-    orderBy: { publishedAt: "desc" },
-    take: 200
-  });
+  console.log("[briefly:db] reading recent articles for dedup comparison...");
+  let recentArticles: { headline: string }[];
+  try {
+    recentArticles = await prisma.article.findMany({
+      select: { headline: true },
+      orderBy: { publishedAt: "desc" },
+      take: 200
+    });
+  } catch (err) {
+    // If the DB read itself fails (bad DATABASE_URL, connection limit, schema
+    // drift, etc), fail loudly and immediately rather than limping into the
+    // per-item loop with no dedup data — that would make every incoming item
+    // look "new" and risk duplicate inserts once the DB comes back.
+    console.error(`[briefly:db] FAILED to read recent articles — aborting ingest pass: ${(err as Error).message}`);
+    throw err;
+  }
   const recentNormalized = new Set(recentArticles.map((a: { headline: string }) => normalizeHeadline(a.headline)));
-  console.log(`[briefly] loaded ${recentArticles.length} recent headline(s) for dedup comparison`);
+  console.log(`[briefly:db] loaded ${recentArticles.length} recent headline(s) for dedup comparison`);
 
   for (const item of items) {
+    const label = `[${item.source}] "${item.headline || "(no headline)"}"`;
+
     if (!item.headline || !item.sourceUrl) {
       itemsSkipped++;
       skipReasons.missingFields++;
+      console.warn(`[briefly:dedupe] SKIP (missingFields) — ${label} (sourceUrl=${item.sourceUrl || "none"})`);
       continue;
     }
 
     const fp = fingerprint(item);
     const normalized = normalizeHeadline(item.headline);
 
-    const alreadyExists = await prisma.article.findUnique({ where: { fingerprint: fp } });
+    let alreadyExists;
+    try {
+      alreadyExists = await prisma.article.findUnique({ where: { fingerprint: fp } });
+    } catch (err) {
+      // A DB error here is not a "duplicate" — treat it as its own failure
+      // mode instead of silently counting it as existingFingerprint, or a
+      // real duplicate-detection bug would be invisible in the skip-reason
+      // breakdown.
+      const message = (err as Error).message;
+      errors.push(`item:${item.source} — ${item.headline}: fingerprint lookup failed: ${message}`);
+      skipReasons.generationError++;
+      itemsSkipped++;
+      console.error(`[briefly:dedupe] fingerprint lookup FAILED — ${label}: ${message}`);
+      continue;
+    }
     if (alreadyExists) {
       itemsSkipped++;
       skipReasons.existingFingerprint++;
+      console.log(`[briefly:dedupe] SKIP (existingFingerprint) — ${label}`);
       continue;
     }
     if (recentNormalized.has(normalized)) {
       itemsSkipped++;
       skipReasons.nearDuplicateHeadline++;
+      console.log(`[briefly:dedupe] SKIP (nearDuplicateHeadline) — ${label}`);
       continue;
     }
 
+    console.log(`[briefly:dedupe] NEW — ${label} — proceeding to AI generation`);
+
     try {
+      const aiStart = Date.now();
+      console.log(`[briefly:ai] generating article — ${label}`);
       const generated = await generateArticle({
         headline: item.headline,
         description: item.description,
@@ -161,10 +196,12 @@ export async function runIngestPass(): Promise<IngestSummary> {
         sourceUrl: item.sourceUrl,
         publishedAt: item.publishedAt
       });
+      console.log(`[briefly:ai] generated in ${Date.now() - aiStart}ms — ${label} → category=${generated.category}`);
 
       const slugBase = slugify(generated.headline);
       const slug = `${slugBase}-${fp.slice(0, 6)}`;
 
+      const dbStart = Date.now();
       await prisma.article.create({
         data: {
           slug,
@@ -189,13 +226,15 @@ export async function runIngestPass(): Promise<IngestSummary> {
 
       recentNormalized.add(normalized);
       itemsNew++;
-      console.log(`[briefly] inserted — [${item.source}] "${generated.headline}" (slug=${slug})`);
+      console.log(
+        `[briefly:db] insert OK in ${Date.now() - dbStart}ms — [${item.source}] "${generated.headline}" (slug=${slug})`
+      );
     } catch (err) {
       const message = (err as Error).message;
       errors.push(`item:${item.source} — ${item.headline}: ${message}`);
       skipReasons.generationError++;
       itemsSkipped++;
-      console.error(`[briefly] item FAILED — [${item.source}] "${item.headline}": ${message}`);
+      console.error(`[briefly:ai/db] FAILED — ${label}: ${message}`);
     }
   }
 
@@ -205,16 +244,24 @@ export async function runIngestPass(): Promise<IngestSummary> {
       `nearDuplicateHeadline=${skipReasons.nearDuplicateHeadline}, generationError=${skipReasons.generationError})`
   );
 
-  await prisma.ingestLog.create({
-    data: {
-      feedName: TRUSTED_SOURCES.map((f) => f.name).join(", "),
-      itemsSeen: items.length,
-      itemsNew,
-      itemsSkipped,
-      errorMessage: errors.length ? errors.slice(0, 10).join(" | ") : null,
-      details: ingestDetailsToJson(feedResults, skipReasons)
-    }
-  });
+  try {
+    await prisma.ingestLog.create({
+      data: {
+        feedName: TRUSTED_SOURCES.map((f) => f.name).join(", "),
+        itemsSeen: items.length,
+        itemsNew,
+        itemsSkipped,
+        errorMessage: errors.length ? errors.slice(0, 10).join(" | ") : null,
+        details: ingestDetailsToJson(feedResults, skipReasons)
+      }
+    });
+    console.log("[briefly:db] IngestLog row written");
+  } catch (err) {
+    // The ingest itself (articles) already succeeded or failed above — this
+    // only logs the run summary. Don't let a failure here masquerade as an
+    // ingest failure in the caller; log it distinctly and move on.
+    console.error(`[briefly:db] FAILED to write IngestLog row (articles were still processed above): ${(err as Error).message}`);
+  }
 
   return { itemsSeen: items.length, itemsNew, itemsSkipped, skipReasons, feedResults, errors };
 }
