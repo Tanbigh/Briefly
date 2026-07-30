@@ -107,6 +107,22 @@ async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T)
 }
 
 async function buildArticles(): Promise<Article[]> {
+  if (process.env.NEXT_PHASE === "phase-production-build") {
+    // Every data-driven route in this app is marked `dynamic = "force-dynamic"`
+    // (see app/page.tsx, app/sitemap.ts, app/rss.xml/route.ts,
+    // app/category/[category]/page.tsx) specifically so nothing runs the live
+    // RSS/Gemini pipeline at build time. Despite that, `next build` still
+    // performs a one-off trial invocation of each route while collecting page
+    // data/traces, purely to catch errors early — and since there's no
+    // guaranteed live network/API access during that build step, letting
+    // this throw here would abort the entire deployment. Skipping it during
+    // this specific phase is safe: force-dynamic routes are re-executed on
+    // every real request in production, so this build-time result is never
+    // what an actual visitor sees.
+    console.log("[briefly] next build phase detected — skipping live RSS/AI pipeline for the build-time trial render");
+    return [];
+  }
+
   console.log(`[briefly] rebuilding article list at ${new Date().toISOString()}`);
 
   const { items, feedResults } = await fetchAllTrustedFeeds();

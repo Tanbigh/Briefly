@@ -1,5 +1,9 @@
 import { getArticles } from "@/lib/data";
 
+// Same reasoning as app/article/[slug]/page.tsx and app/sitemap.ts: avoid a
+// build-time RSS/Gemini call. Render on demand; getArticles() is already
+// cached internally via unstable_cache.
+export const dynamic = "force-dynamic";
 export const revalidate = 300;
 
 export async function GET() {

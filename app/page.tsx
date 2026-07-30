@@ -5,6 +5,12 @@ import NewsCard from "@/components/NewsCard";
 import LoadMoreArticles from "@/components/LoadMoreArticles";
 import { getArticles, getBreakingArticle, getTrendingArticles } from "@/lib/data";
 
+// Same reasoning as app/article/[slug]/page.tsx: this is a database-free,
+// RSS-driven site, and Next.js would otherwise try to statically generate
+// this route at `next build` time — before the build has network access to
+// RSS/the Gemini API in most CI/deploy setups. Render on demand instead;
+// getArticles() is already cached internally via unstable_cache.
+export const dynamic = "force-dynamic";
 export const revalidate = 120;
 
 export default async function HomePage() {

@@ -4,6 +4,7 @@ import NewsCard from "@/components/NewsCard";
 import { getArticlesByCategory } from "@/lib/data";
 
 // See app/article/[slug]/page.tsx for why this is required.
+export const dynamic = "force-dynamic";
 export const revalidate = 120;
 
 export async function generateMetadata({ params }: { params: { category: string } }): Promise<Metadata> {

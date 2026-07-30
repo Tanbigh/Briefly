@@ -8,7 +8,7 @@ import ShareButton from "@/components/ShareButton";
 
 // No generateStaticParams here on purpose: this is a database-free,
 // RSS-driven site, and generateStaticParams would run at `next build`
-// time — before the build has network access to RSS/the Anthropic API in
+// time — before the build has network access to RSS/the Gemini API in
 // most CI setups, and before any of today's stories exist. Instead every
 // slug is rendered on demand (first visit) and then cached for
 // `revalidate` seconds, same as the other pages — fast for every
