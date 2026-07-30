@@ -1,6 +1,7 @@
 import { MOCK_WEATHER } from "@/lib/mock-data";
 
 export const metadata = { title: "Weather" };
+export const revalidate = 300;
 
 export default function WeatherPage() {
   return (

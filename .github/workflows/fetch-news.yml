@@ -1,5 +1,11 @@
 name: Fetch News
 
+# This is the ONLY scheduler for Briefly's news pipeline. Vercel Cron is
+# deliberately not used because it's a Pro-plan feature — Vercel's free
+# Hobby plan only allows once-per-day cron jobs. Running the scheduler
+# here instead means the site keeps publishing new stories every 10
+# minutes regardless of hosting plan.
+
 on:
   schedule:
     - cron: "*/10 * * * *"

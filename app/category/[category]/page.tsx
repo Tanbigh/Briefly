@@ -3,6 +3,9 @@ import CategoryNav from "@/components/CategoryNav";
 import NewsCard from "@/components/NewsCard";
 import { getArticlesByCategory } from "@/lib/data";
 
+// See app/article/[slug]/page.tsx for why this is required.
+export const revalidate = 120;
+
 export async function generateMetadata({ params }: { params: { category: string } }): Promise<Metadata> {
   const category = decodeURIComponent(params.category);
   return { title: category, description: `Latest ${category} news, summarized in English and Bengali by Briefly.` };

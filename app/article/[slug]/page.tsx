@@ -6,6 +6,12 @@ import { formatRelativeTime } from "@/lib/format";
 import BookmarkButton from "@/components/BookmarkButton";
 import ShareButton from "@/components/ShareButton";
 
+// Without this, a page that uses generateStaticParams is rendered once at
+// build time and never refreshed — new articles published after deploy
+// would never appear here. Revalidating every 2 minutes keeps it current
+// while still serving cached HTML most of the time (fast + cheap).
+export const revalidate = 120;
+
 export async function generateStaticParams() {
   const articles = await getArticles();
   return articles.map((a) => ({ slug: a.slug }));

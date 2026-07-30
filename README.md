@@ -63,17 +63,32 @@ bilingual article for everything new.
 
 ## Keeping it running automatically
 
-Two options are wired up — use whichever fits your plan:
+**GitHub Actions is the only scheduler** — `.github/workflows/fetch-news.yml`
+runs `npm run fetch-news` every 10 minutes.
 
-1. **Vercel Cron** (`vercel.json`) calls `/api/cron/fetch-news` on a schedule.
-   Note: Vercel's free (Hobby) plan only allows once-per-day cron jobs; a Pro
-   plan is needed for the every-10-minutes schedule configured here.
-2. **GitHub Actions** (`.github/workflows/fetch-news.yml`) runs
-   `npm run fetch-news` every 10 minutes regardless of hosting plan — add
+Vercel Cron is deliberately not used: it's a Vercel Pro feature, and the free
+Hobby plan only allows cron jobs to run once a day, which isn't frequent
+enough for a live news feed. Running the scheduler in GitHub Actions instead
+means:
+
+- It works on the Vercel Hobby plan with no restrictions.
+- It's not bound by Vercel's serverless function duration limits (Hobby caps
+  a single function invocation at 10 seconds — not enough time to summarize
+  and translate several new stories in one pass).
+
+To enable it:
+
+1. Push this repo to GitHub.
+2. In the repo's **Settings → Secrets and variables → Actions**, add
    `DATABASE_URL` and `ANTHROPIC_API_KEY` as repository secrets.
+3. That's it — the workflow starts running every 10 minutes automatically.
+   You can also trigger it manually from the **Actions** tab
+   (`workflow_dispatch`) to do an initial fetch right after deploying.
 
-Either way, once deployed and scheduled, the site updates itself with no
-further manual work.
+There's also a small `/api/cron/fetch-news` route in the app itself, but
+it's only there for manual/admin use (e.g. `curl` it once after deploying to
+seed the database) — it is not used for scheduling and is not required for
+the site to work.
 
 ## Copyright approach
 
@@ -83,12 +98,38 @@ in its own RSS feed for syndication — the same fields any news reader app
 would use. Every article links back to the original source with a
 "Read Original Article" button.
 
-## Deploying
+## Troubleshooting: "the site isn't showing new articles"
+
+If content looks frozen, check in this order:
+
+1. **GitHub Actions tab** — is the "Fetch News" workflow actually running every
+   10 minutes, and is it green? A red run almost always means
+   `DATABASE_URL` or `ANTHROPIC_API_KEY` isn't set (or has expired) as a
+   repository secret — the script now fails loudly and exits non-zero in
+   that case instead of silently doing nothing.
+2. **The `IngestLog` table** — each run writes a row with `itemsSeen`,
+   `itemsNew`, `itemsSkipped`, and any `errorMessage`. If `itemsNew` is
+   consistently 0 with no errors, there's simply no new news right now
+   (normal). If it's 0 *with* errors every run, something's broken
+   upstream (bad API key, DB unreachable, a feed URL that stopped working).
+3. **Page caching** — `article/[slug]` and `category/[category]` pages use
+   `revalidate = 120`, so new rows in the database should appear within two
+   minutes without a redeploy. If you still see stale content after that,
+   check your CDN/browser isn't hard-caching (a hard refresh should confirm).
+
+## Deploying (Vercel Hobby plan)
 
 1. Push this repo to GitHub.
-2. Import it into Vercel.
-3. Add the environment variables from `.env.example` in Vercel's project settings.
-4. Provision a Postgres database (Vercel Postgres, Neon, or Supabase all work)
-   and run `npm run db:push` once against it.
-5. Deploy. Set up the cron job (Vercel Cron or GitHub Actions) so new stories
-   keep publishing automatically.
+2. Import it into Vercel — the Hobby (free) plan is sufficient; nothing here
+   requires Pro.
+3. Add the environment variables from `.env.example` in Vercel's project
+   settings (`DATABASE_URL`, `ANTHROPIC_API_KEY`, `NEXT_PUBLIC_SITE_URL`,
+   `CRON_SECRET`).
+4. Provision a Postgres database (Vercel Postgres, Neon, or Supabase all work
+   on their free tiers) and run `npm run db:push` once against it.
+5. Deploy.
+6. Add `DATABASE_URL` and `ANTHROPIC_API_KEY` as GitHub Actions repository
+   secrets so the scheduler in step "Keeping it running automatically" above
+   can start publishing new stories every 10 minutes.
+
+No Vercel Cron configuration is needed or used anywhere in this project.

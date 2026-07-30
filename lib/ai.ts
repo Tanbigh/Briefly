@@ -125,39 +125,4 @@ Description: ${item.description}`;
   };
 }
 
-/**
- * Cheap similarity check used for duplicate detection before we bother
- * calling generateArticle at all. Full duplicate detection in
- * scripts/fetch-news.ts also compares headline hashes and source URLs;
- * this is a secondary semantic check for near-duplicate coverage of the
- * same event from two different outlets.
- */
-export async function isDuplicateStory(
-  candidateHeadline: string,
-  existingHeadlines: string[]
-): Promise<boolean> {
-  if (existingHeadlines.length === 0) return false;
 
-  const response = await client.messages.create({
-    model: MODEL,
-    max_tokens: 10,
-    system:
-      'Answer with only "yes" or "no". "yes" if the candidate headline is reporting the same underlying news event as any headline in the existing list, "no" otherwise.',
-    messages: [
-      {
-        role: "user",
-        content: `Candidate: ${candidateHeadline}\n\nExisting headlines:\n${existingHeadlines
-          .slice(0, 25)
-          .map((h) => `- ${h}`)
-          .join("\n")}`
-      }
-    ]
-  });
-
-  const text = response.content
-    .map((b) => (b.type === "text" ? b.text : ""))
-    .join("")
-    .toLowerCase();
-
-  return text.includes("yes");
-}
