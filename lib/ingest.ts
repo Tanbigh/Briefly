@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import { Prisma } from "@prisma/client";
 import { fetchAllTrustedFeeds, TRUSTED_SOURCES, type FeedItem, type FeedResult } from "./rss";
 import { generateArticle } from "./ai";
 import { prisma } from "./db";
@@ -23,6 +24,41 @@ function normalizeHeadline(headline: string): string {
     .replace(/[^a-z0-9\s]/g, "")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+/**
+ * Prisma's `Json` columns only accept a value assignable to
+ * `Prisma.InputJsonValue`, which requires a plain, index-signature-
+ * compatible object shape. `FeedResult` (lib/rss.ts) is declared as a
+ * TypeScript `interface`, and TypeScript does not treat a value typed
+ * by a named interface as assignable to an indexed type like
+ * `Prisma.JsonObject` — even though every one of its fields (strings,
+ * numbers, an optional string) is itself perfectly JSON-safe. Building
+ * a fresh plain-object literal per entry (instead of handing the
+ * `FeedResult[]` array to Prisma as-is) satisfies the compiler without
+ * `any`, `@ts-ignore`, or a blind `as` cast.
+ */
+function feedResultToJson(result: FeedResult): Prisma.InputJsonObject {
+  return {
+    name: result.name,
+    url: result.url,
+    status: result.status,
+    itemCount: result.itemCount,
+    error: result.error ?? null,
+    durationMs: result.durationMs
+  };
+}
+
+/** Converts the full ingest debug payload (feed results + skip-reason
+ *  breakdown) into a Prisma-JSON-compatible shape for `IngestLog.details`. */
+function ingestDetailsToJson(
+  feedResults: FeedResult[],
+  skipReasons: IngestSummary["skipReasons"]
+): Prisma.InputJsonValue {
+  return {
+    feedResults: feedResults.map(feedResultToJson),
+    skipReasons: { ...skipReasons }
+  };
 }
 
 export interface IngestSummary {
@@ -176,7 +212,7 @@ export async function runIngestPass(): Promise<IngestSummary> {
       itemsNew,
       itemsSkipped,
       errorMessage: errors.length ? errors.slice(0, 10).join(" | ") : null,
-      details: { feedResults, skipReasons }
+      details: ingestDetailsToJson(feedResults, skipReasons)
     }
   });
 
