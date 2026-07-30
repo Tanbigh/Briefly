@@ -9,6 +9,8 @@ import { getArticles, getArticlesByCategory, searchArticles } from "@/lib/data";
 // lib/data.ts, so this only controls whether *this route's response* is
 // cached, not whether RSS/AI is re-run per request.
 export const dynamic = "force-dynamic";
+// See app/page.tsx for why this is raised.
+export const maxDuration = 300;
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);

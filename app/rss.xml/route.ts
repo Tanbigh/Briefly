@@ -5,6 +5,8 @@ import { getArticles } from "@/lib/data";
 // cached internally via unstable_cache.
 export const dynamic = "force-dynamic";
 export const revalidate = 300;
+// See app/page.tsx for why this is raised.
+export const maxDuration = 300;
 
 export async function GET() {
   const base = process.env.NEXT_PUBLIC_SITE_URL ?? "https://briefly.news";

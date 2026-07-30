@@ -39,8 +39,18 @@ import { generateArticle } from "./ai";
 const ARTICLE_LIST_REVALIDATE_SECONDS = 600; // 10 minutes — the site-wide refresh window
 const AI_CACHE_REVALIDATE_SECONDS = 60 * 60 * 24 * 3; // 3 days — per-article AI cache
 const RECENCY_WINDOW_MS = 48 * 60 * 60 * 1000; // ignore anything a feed returns older than this
-const MAX_ARTICLES = 60; // caps AI spend + page size per refresh cycle
-const AI_CONCURRENCY = 5; // parallel Gemini calls per refresh
+
+// Gemini's free tier caps gemini-2.5-flash at 5 requests/minute (lib/ai.ts
+// throttles to stay just under that). At that pace, generating N articles
+// takes roughly N * 13 seconds — e.g. 60 articles ≈ 13 minutes, which is
+// far beyond any realistic serverless function timeout (Vercel Hobby: 10s,
+// Pro: up to 60-300s). Since this whole pipeline is awaited directly by the
+// page that triggers it, MAX_ARTICLES has to fit inside your actual
+// deployment's timeout, not just the free-tier's raw quota. Default here
+// assumes a modest timeout; raise it once you're on a paid Gemini tier
+// (much higher RPM) and/or a longer Vercel function timeout.
+const MAX_ARTICLES = Number(process.env.MAX_ARTICLES || 15); // caps AI spend + page size per refresh cycle
+const AI_CONCURRENCY = 3; // real pacing is enforced globally in lib/ai.ts; this just limits in-flight unstable_cache reads
 
 const BREAKING_WINDOW_MS = 24 * 60 * 60 * 1000;
 const TRENDING_WINDOW_MS = 48 * 60 * 60 * 1000;

@@ -6,6 +6,8 @@ import { getArticlesByCategory } from "@/lib/data";
 // See app/article/[slug]/page.tsx for why this is required.
 export const dynamic = "force-dynamic";
 export const revalidate = 120;
+// See app/page.tsx for why this is raised.
+export const maxDuration = 300;
 
 export async function generateMetadata({ params }: { params: { category: string } }): Promise<Metadata> {
   const category = decodeURIComponent(params.category);

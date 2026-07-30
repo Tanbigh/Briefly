@@ -3,6 +3,8 @@ import { fetchAllTrustedFeeds } from "@/lib/rss";
 import { getArticles } from "@/lib/data";
 
 export const dynamic = "force-dynamic";
+// See app/page.tsx for why this is raised.
+export const maxDuration = 300;
 
 /**
  * Diagnostics for the no-database, RSS -> AI -> cache pipeline.

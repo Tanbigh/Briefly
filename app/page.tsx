@@ -12,6 +12,12 @@ import { getArticles, getBreakingArticle, getTrendingArticles } from "@/lib/data
 // getArticles() is already cached internally via unstable_cache.
 export const dynamic = "force-dynamic";
 export const revalidate = 120;
+// Generating MAX_ARTICLES articles under Gemini's free-tier rate limit takes
+// roughly MAX_ARTICLES * 13 seconds (see lib/data.ts and lib/ai.ts). Raise
+// Vercel's default function timeout so a full rebuild has room to finish.
+// Note: Hobby plans cap this at 60s regardless of what's set here — reduce
+// MAX_ARTICLES or upgrade your plan if you're on Hobby.
+export const maxDuration = 300;
 
 export default async function HomePage() {
   const [articles, breaking, trending] = await Promise.all([

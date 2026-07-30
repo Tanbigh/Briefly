@@ -8,6 +8,8 @@ import { CATEGORY_LIST } from "@/lib/site-data";
 // RSS/the Gemini API in most CI/deploy setups, and before any of today's
 // articles exist. Render it on demand instead, cached like every other page.
 export const dynamic = "force-dynamic";
+// See app/page.tsx for why this is raised.
+export const maxDuration = 300;
 
 export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
   const base = process.env.NEXT_PUBLIC_SITE_URL ?? "https://briefly.news";
