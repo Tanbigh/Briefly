@@ -1,5 +1,5 @@
 import { GoogleGenAI } from "@google/genai";
-import type { Category, ExamRelevance } from "./types";
+import type { Category } from "./types";
 
 /**
  * Briefly's AI pipeline.
@@ -11,15 +11,6 @@ import type { Category, ExamRelevance } from "./types";
  * publisher-provided description, never a full scraped article body.
  *
  * Model access goes through the official Google Gemini SDK.
- *
- * -------------------------------------------------------------------
- * AUDIENCE: Briefly is a current-affairs platform for competitive-exam
- * aspirants (UPSC, WBCS, SSC, Banking, Railway, State PSC, etc), not a
- * general news app. The system prompt below asks the model to grade every
- * story for exam relevance and importance, and to pull out the kind of
- * structured facts an aspirant would actually want (key facts, dates,
- * why it matters, a prelims-style takeaway) — see GeneratedArticle below.
- * -------------------------------------------------------------------
  */
 
 const ai = new GoogleGenAI({
@@ -54,32 +45,6 @@ const CATEGORIES: Category[] = [
   "Sports",
   "Entertainment",
   "Environment"
-];
-
-const EXAM_RELEVANCE_LEVELS: ExamRelevance[] = ["High", "Medium", "Low"];
-
-// The fixed set of topic areas Briefly's aspirant audience actually cares
-// about. This is fed straight into the system prompt so the model grades
-// exam relevance/importance against a concrete list instead of a vague
-// "is this important" judgment call.
-const PRIORITY_TOPICS = [
-  "Government schemes and policies",
-  "Parliament and Bills",
-  "Supreme Court and High Court judgments",
-  "Economy, RBI, SEBI, Budget, Banking",
-  "International relations and diplomacy",
-  "Defence and military exercises",
-  "Science, Space, ISRO, DRDO",
-  "Environment and Climate",
-  "Awards and Honours",
-  "Important appointments and resignations",
-  "Reports and Indexes (e.g. rankings, indices published by government/international bodies)",
-  "Education and government recruitment",
-  "Election Commission updates",
-  "Important sports events and records (only major/record-setting ones, not routine match coverage)",
-  "Major disasters and humanitarian events",
-  "Technology and AI developments",
-  "Health and WHO updates"
 ];
 
 // Gemini's free tier caps gemini-2.5-flash at 5 requests/minute (see the
@@ -186,30 +151,18 @@ export interface GeneratedArticle {
   category: Category;
   isBreaking: boolean;
   tags: string[];
-
-  // --- Exam-prep fields ---
-  examRelevance: ExamRelevance;
-  importanceScore: number; // 0-100
-  keyFacts: string[];
-  importantDates: string[];
-  whyItMatters: string;
-  prelimsFact?: string;
 }
 
 /**
- * Turns a raw feed item into a full bilingual Briefly article, graded and
- * annotated for competitive-exam relevance.
+ * Turns a raw feed item into a full bilingual Briefly article.
  * One model call, structured JSON output, strict grounding rules.
  */
 export async function generateArticle(item: RawItem): Promise<GeneratedArticle> {
-  const system = `You are the automated news desk for Briefly, a bilingual (English/Bengali) current-affairs
-briefing platform built specifically for competitive-exam aspirants — UPSC, WBCS, SSC, Banking,
-Railway, State PSC, and similar government exams. You are NOT a general news desk: your job is to
-help someone studying for these exams quickly get the facts they actually need, not to entertain.
+  const system = `You are the automated news desk for Briefly, a bilingual (English/Bengali) news briefing platform.
 
 Rules you must always follow:
 - You are given only a headline and a short public description/dek of a news item, never a full article body.
-- Never invent facts, quotes, numbers, dates, or names that are not present in the input.
+- Never invent facts, quotes, numbers, or names that are not present in the input.
 - If the input is too thin to summarize responsibly, keep the summary short and general rather than fabricating detail.
 - Write in a neutral, professional journalism tone. No opinions, no speculation, no exaggeration.
 - The English summary must be 2-5 short paragraphs, readable in about 30-40 seconds.
@@ -222,37 +175,6 @@ Rules you must always follow:
   results, natural disasters, major resignations, wars, major court judgments, deaths of significant public figures).
 - tags should be 3-8 short strings: people, organizations, and locations mentioned, useful for search.
 
-EXAM RELEVANCE — this is the most important judgment you make. Grade every story against this fixed
-list of high-value topic areas for these exams:
-${PRIORITY_TOPICS.map((t) => `  - ${t}`).join("\n")}
-
-- "examRelevance": one of "High", "Medium", "Low".
-  - "High": directly matches one of the priority topic areas above and is nationally/internationally
-    significant (e.g. a new government scheme, a Bill passed, a Supreme Court judgment, an RBI/SEBI policy
-    move, an ISRO/DRDO milestone, a major appointment, an international summit outcome, a disaster with
-    national response, a WHO declaration).
-  - "Medium": loosely touches a priority topic area, or is state/local-level rather than national, or is
-    a minor/update-only version of an already-known development.
-  - "Low": celebrity gossip, movie/entertainment news, lifestyle content, viral/trivia stories, routine
-    (non-record-setting) match reports, or anything with no real bearing on these exams. Grade honestly as
-    "Low" even if you are given an entertainment story — do not inflate its relevance just because it exists.
-- "importanceScore": an integer 0-100 reflecting overall national/exam significance (not just how
-  "interesting" the story is). As a rough guide: 80-100 for major national/international developments
-  (constitutional, policy, judgment, economy, defence, diplomacy, disaster with wide impact), 50-79 for
-  solid but narrower stories (a single scheme launch, a single appointment, a state-level policy), 20-49
-  for minor updates or routine coverage, 0-19 for low-value/entertainment/trivia content. This score is
-  used to rank the homepage, so be honest and consistent rather than generous.
-- "keyFacts": 3-6 short factual bullet strings (figures, names, institutions, numbers) taken ONLY from the
-  input — never invented. Use an empty array if the input genuinely doesn't contain enough concrete detail.
-- "importantDates": any specific dates explicitly present in the input (e.g. "launched on 15 July 2026",
-  "the Bill was passed on..."). Use an empty array if none are given — never guess a date.
-- "whyItMatters": one or two sentences explaining, specifically, why an exam aspirant should know this —
-  e.g. what body/scheme/policy it relates to, what precedent or trend it reflects.
-- "prelimsFact": a short, exam-style nugget — either a "Prelims Fact" (a crisp, memorable fact framed the
-  way a prelims MCQ option might state it) or a "Possible Exam Question" (a single plausible question this
-  news could inspire). Base it strictly on facts present in the input. Omit this field (empty string) for
-  stories too trivial or thin to warrant one — don't force it for low-value content.
-
 Respond with ONLY a single JSON object, no markdown fences, no commentary, matching this exact shape:
 {
   "headline": string,
@@ -263,13 +185,7 @@ Respond with ONLY a single JSON object, no markdown fences, no commentary, match
   "summaryBn": string[],
   "category": string,
   "isBreaking": boolean,
-  "tags": string[],
-  "examRelevance": "High" | "Medium" | "Low",
-  "importanceScore": number,
-  "keyFacts": string[],
-  "importantDates": string[],
-  "whyItMatters": string,
-  "prelimsFact": string
+  "tags": string[]
 }`;
 
   const user = `Source: ${item.source}
@@ -331,11 +247,6 @@ Description: ${item.description}`;
     throw err;
   }
 
-  const importanceScoreRaw = Number(parsed.importanceScore);
-  const importanceScore = Number.isFinite(importanceScoreRaw)
-    ? Math.max(0, Math.min(100, Math.round(importanceScoreRaw)))
-    : 50; // neutral fallback if the model omitted/mangled this — never silently 0, which would bury the story
-
   return {
     headline: parsed.headline,
     headlineBn: parsed.headlineBn,
@@ -345,12 +256,6 @@ Description: ${item.description}`;
     summaryBn: parsed.summaryBn,
     category: CATEGORIES.includes(parsed.category) ? parsed.category : "World",
     isBreaking: Boolean(parsed.isBreaking),
-    tags: Array.isArray(parsed.tags) ? parsed.tags : [],
-    examRelevance: EXAM_RELEVANCE_LEVELS.includes(parsed.examRelevance) ? parsed.examRelevance : "Medium",
-    importanceScore,
-    keyFacts: Array.isArray(parsed.keyFacts) ? parsed.keyFacts : [],
-    importantDates: Array.isArray(parsed.importantDates) ? parsed.importantDates : [],
-    whyItMatters: typeof parsed.whyItMatters === "string" ? parsed.whyItMatters : "",
-    prelimsFact: typeof parsed.prelimsFact === "string" && parsed.prelimsFact.trim() ? parsed.prelimsFact : undefined
+    tags: Array.isArray(parsed.tags) ? parsed.tags : []
   };
 }
