@@ -1,5 +1,3 @@
-console.log("GEMINI_API_KEY =", process.env.GEMINI_API_KEY);
-
 import { GoogleGenAI } from "@google/genai";
 import type { Category } from "./types";
 
@@ -115,7 +113,11 @@ Description: ${item.description}`;
     throw err;
   }
 
-  const text = (response.text() ?? "").trim();
+  const candidateText = response.candidates?.[0]?.content?.parts
+    ?.map((part) => part.text ?? "")
+    .join("") ?? "";
+
+  const text = (candidateText || response.text || "").trim();
 
   const cleaned = text.replace(/^```json/i, "").replace(/```$/, "").trim();
 
