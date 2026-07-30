@@ -5,7 +5,7 @@ export default function BreakingBanner({ article }: { article: Article }) {
   return (
     <Link
       href={`/article/${article.slug}`}
-      className="block border-b border-terracotta/20 bg-[#F6E7DC]"
+      className="block border-b border-terracotta/20 bg-breaking"
     >
       <div className="container-editorial flex items-center gap-3 py-2.5 text-sm">
         <span className="shrink-0 rounded-full bg-terracotta px-2.5 py-0.5 text-xs font-semibold text-ivory">

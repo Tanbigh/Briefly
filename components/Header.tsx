@@ -1,5 +1,6 @@
 import Link from "next/link";
 import SearchBar from "./SearchBar";
+import ThemeToggle from "./ThemeToggle";
 
 export default function Header() {
   return (
@@ -31,8 +32,11 @@ export default function Header() {
           </Link>
         </nav>
 
-        <div className="w-full max-w-[260px]">
-          <SearchBar compact />
+        <div className="flex items-center gap-3">
+          <div className="w-full max-w-[260px]">
+            <SearchBar compact />
+          </div>
+          <ThemeToggle />
         </div>
       </div>
     </header>

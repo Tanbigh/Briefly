@@ -1,6 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getArticles, getArticlesByCategory, searchArticles } from "@/lib/data";
 
+// Explicitly opt this route out of any static/CDN caching. It already
+// becomes dynamic implicitly (it reads `request.url`), but that's an
+// implementation detail of Next.js's heuristics — spelling it out here
+// means it stays fresh even if the route's internals change later, and
+// keeps this in sync with the same guarantee on /api/cron/fetch-news.
+export const dynamic = "force-dynamic";
+
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const category = searchParams.get("category");
@@ -13,5 +20,8 @@ export async function GET(request: NextRequest) {
   const page = all.slice(cursor, cursor + limit);
   const nextCursor = cursor + limit < all.length ? cursor + limit : null;
 
-  return NextResponse.json({ articles: page, nextCursor, total: all.length });
+  return NextResponse.json(
+    { articles: page, nextCursor, total: all.length },
+    { headers: { "Cache-Control": "no-store, must-revalidate" } }
+  );
 }

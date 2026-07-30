@@ -43,13 +43,38 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: "#FFFDF8"
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#FFFDF8" },
+    { media: "(prefers-color-scheme: dark)", color: "#161311" }
+  ]
 };
+
+// Runs before hydration so the correct theme class is on <html> for the
+// very first paint — this is what prevents a flash of light mode for
+// users who prefer (or previously chose) dark. Kept tiny and dependency-
+// free since it blocks rendering.
+const THEME_INIT_SCRIPT = `
+(function () {
+  try {
+    var stored = localStorage.getItem("briefly-theme");
+    var theme =
+      stored === "light" || stored === "dark"
+        ? stored
+        : window.matchMedia("(prefers-color-scheme: dark)").matches
+        ? "dark"
+        : "light";
+    if (theme === "dark") document.documentElement.classList.add("dark");
+  } catch (e) {}
+})();
+`;
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`${inter.variable} ${manrope.variable} ${notoSerifBengali.variable} ${hindSiliguri.variable}`}>
-      <body className="flex min-h-screen flex-col bg-ivory">
+    <html lang="en" className={`${inter.variable} ${manrope.variable} ${notoSerifBengali.variable} ${hindSiliguri.variable}`} suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
+      </head>
+      <body className="flex min-h-screen flex-col bg-ivory text-ink">
         <a
           href="#main-content"
           className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-md focus:bg-ink focus:px-4 focus:py-2 focus:text-ivory"

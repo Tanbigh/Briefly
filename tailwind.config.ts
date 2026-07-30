@@ -1,29 +1,45 @@
 import type { Config } from "tailwindcss";
 
+/**
+ * Every color below is backed by a CSS custom property (defined in
+ * app/globals.css as space-separated RGB, e.g. `--color-ivory: 255 253 248`)
+ * instead of a fixed hex value. `.dark` in globals.css redefines the same
+ * variable names to their dark-theme values, so toggling one class on
+ * <html> re-themes every component that uses `bg-ivory`, `text-ink`, etc. —
+ * without editing each component individually. The `rgb(var(...) / <alpha>)`
+ * form preserves Tailwind's opacity-modifier syntax (e.g. `bg-ivory/90`).
+ */
+function withOpacity(varName: string) {
+  return ({ opacityValue }: { opacityValue?: string }) =>
+    opacityValue === undefined ? `rgb(var(${varName}))` : `rgb(var(${varName}) / ${opacityValue})`;
+}
+
 const config: Config = {
+  darkMode: "class",
   content: ["./app/**/*.{ts,tsx}", "./components/**/*.{ts,tsx}"],
   theme: {
     extend: {
       colors: {
-        ivory: "#FFFDF8",
-        beige: "#F7F3EC",
-        cream: "#FFF8F2",
-        peach: "#FDF4EC",
-        card: "#FFFFFF",
-        "card-soft": "#FBF6EE",
+        ivory: withOpacity("--color-ivory"),
+        beige: withOpacity("--color-beige"),
+        cream: withOpacity("--color-cream"),
+        peach: withOpacity("--color-peach"),
+        card: withOpacity("--color-card"),
+        "card-soft": withOpacity("--color-card-soft"),
         terracotta: {
-          DEFAULT: "#B5603C",
-          soft: "#D98A63"
+          DEFAULT: withOpacity("--color-terracotta"),
+          soft: withOpacity("--color-terracotta-soft")
         },
-        sand: "#D9C4A3",
-        gold: "#B8912E",
+        sand: withOpacity("--color-sand"),
+        gold: withOpacity("--color-gold"),
         brown: {
-          DEFAULT: "#6B5B4E",
-          deep: "#453A31"
+          DEFAULT: withOpacity("--color-brown"),
+          deep: withOpacity("--color-brown-deep")
         },
-        slateblue: "#5B6B8C",
-        ink: "#2B2621",
-        "ink-soft": "#5B5147"
+        slateblue: withOpacity("--color-slateblue"),
+        ink: withOpacity("--color-ink"),
+        "ink-soft": withOpacity("--color-ink-soft"),
+        breaking: withOpacity("--color-breaking-bg")
       },
       fontFamily: {
         sans: ["var(--font-inter)", "system-ui", "sans-serif"],

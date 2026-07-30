@@ -3,6 +3,56 @@
 @tailwind utilities;
 
 @layer base {
+  :root {
+    /* Light theme (default). Values are space-separated RGB so Tailwind's
+       rgb(var(...) / <alpha-value>) opacity modifiers keep working. */
+    --color-ivory: 255 253 248;
+    --color-beige: 247 243 236;
+    --color-cream: 255 248 242;
+    --color-peach: 253 244 236;
+    --color-card: 255 255 255;
+    --color-card-soft: 251 246 238;
+    --color-terracotta: 181 96 60;
+    --color-terracotta-soft: 217 138 99;
+    --color-sand: 217 196 163;
+    --color-gold: 184 145 46;
+    --color-brown: 107 91 78;
+    --color-brown-deep: 69 58 49;
+    --color-slateblue: 91 107 140;
+    --color-ink: 43 38 33;
+    --color-ink-soft: 91 81 71;
+    --color-breaking-bg: 246 231 220;
+    --color-selection-bg: 232 203 184;
+    --color-selection-fg: 43 38 33;
+    --color-focus-ring: 181 96 60;
+  }
+
+  .dark {
+    /* Warm dark theme — kept off pure black to match the editorial,
+       paper-like feel of the light theme rather than switching to a
+       generic slate/gray dark UI. Terracotta/gold accents are lightened
+       so they keep enough contrast against the dark backgrounds. */
+    --color-ivory: 22 19 17;
+    --color-beige: 30 26 22;
+    --color-cream: 26 22 19;
+    --color-peach: 37 28 23;
+    --color-card: 32 27 24;
+    --color-card-soft: 38 32 28;
+    --color-terracotta: 224 138 100;
+    --color-terracotta-soft: 235 168 130;
+    --color-sand: 74 64 54;
+    --color-gold: 214 173 90;
+    --color-brown: 196 178 160;
+    --color-brown-deep: 224 210 196;
+    --color-slateblue: 148 165 209;
+    --color-ink: 240 234 226;
+    --color-ink-soft: 181 168 152;
+    --color-breaking-bg: 46 34 27;
+    --color-selection-bg: 92 61 42;
+    --color-selection-fg: 240 234 226;
+    --color-focus-ring: 224 138 100;
+  }
+
   html {
     scroll-behavior: smooth;
   }
@@ -12,13 +62,25 @@
     font-feature-settings: "kern" 1, "liga" 1;
   }
 
+  /* Smooth, polished theme switching. Scoped to the properties that
+     actually change between themes (not `all`) so layout-affecting or
+     interaction-heavy transitions elsewhere aren't slowed down. */
+  html.theme-transition,
+  html.theme-transition *,
+  html.theme-transition *::before,
+  html.theme-transition *::after {
+    transition-property: background-color, border-color, color, fill, stroke, box-shadow !important;
+    transition-duration: 300ms !important;
+    transition-timing-function: ease !important;
+  }
+
   ::selection {
-    background: #E8CBB8;
-    color: #2B2621;
+    background: rgb(var(--color-selection-bg));
+    color: rgb(var(--color-selection-fg));
   }
 
   :focus-visible {
-    outline: 2px solid #B5603C;
+    outline: 2px solid rgb(var(--color-focus-ring));
     outline-offset: 3px;
     border-radius: 4px;
   }

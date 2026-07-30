@@ -3,6 +3,25 @@ import { MOCK_ARTICLES } from "./mock-data";
 
 const hasDatabase = Boolean(process.env.DATABASE_URL);
 
+/**
+ * `isBreaking` / `isTrending` are written once by the AI pipeline at
+ * ingest time (see lib/ai.ts) and are never cleared afterwards. On a
+ * quiet news day nothing new gets marked breaking, so without a
+ * freshness check here the most recent article that ever *was* marked
+ * breaking — even one from yesterday or last week — keeps winning
+ * `getBreakingArticle()`'s `.find()` forever. That's the "yesterday's
+ * news shown as today's breaking news" bug: the flag isn't stale data,
+ * it's a flag with no expiry. Filtering by publish time here is a
+ * read-time fix (no migration, no cron changes needed) and self-heals
+ * automatically as time passes.
+ */
+const BREAKING_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
+const TRENDING_WINDOW_MS = 48 * 60 * 60 * 1000; // 48 hours
+
+function isWithin(publishedAt: string, windowMs: number): boolean {
+  return Date.now() - new Date(publishedAt).getTime() <= windowMs;
+}
+
 async function fromDb(): Promise<Article[]> {
   const { prisma } = await import("./db");
   const rows = await prisma.article.findMany({ orderBy: { publishedAt: "desc" } });
@@ -54,12 +73,12 @@ export async function getArticlesByCategory(category: string): Promise<Article[]
 
 export async function getBreakingArticle(): Promise<Article | undefined> {
   const all = await getArticles();
-  return all.find((a) => a.isBreaking);
+  return all.find((a) => a.isBreaking && isWithin(a.publishedAt, BREAKING_WINDOW_MS));
 }
 
 export async function getTrendingArticles(): Promise<Article[]> {
   const all = await getArticles();
-  return all.filter((a) => a.isTrending);
+  return all.filter((a) => a.isTrending && isWithin(a.publishedAt, TRENDING_WINDOW_MS));
 }
 
 export async function searchArticles(query: string): Promise<Article[]> {
