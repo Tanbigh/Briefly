@@ -11,8 +11,8 @@ import { readSnapshot, writeSnapshot, type Snapshot } from "./snapshot";
  * piece of persistent state — a single JSON snapshot in Redis (see
  * lib/snapshot.ts) — everything else is still derived live from RSS + AI.
  *
- *   RSS feeds -> dedupe -> AI summarize + exam-relevance judge -> merge
- *   into snapshot -> pages just read the snapshot
+ *   RSS feeds -> dedupe -> priority-tier -> AI summarize + exam-relevance
+ *   judge -> merge into snapshot -> pages just read the snapshot
  *
  * ---------------------------------------------------------------------
  * WHY THIS FILE CHANGED SHAPE (read this before touching it)
@@ -58,6 +58,24 @@ import { readSnapshot, writeSnapshot, type Snapshot } from "./snapshot";
  *      shrink it. A fully failed cycle (all RSS down, or zero articles
  *      produced) leaves the stored snapshot completely untouched.
  *
+ *   4. NEW: candidate stories are now sorted into a cheap, keyword-based
+ *      priority tier BEFORE any of them touch AI generation (see
+ *      `classifyPriorityTier()` and its use inside `buildArticles()`).
+ *      Previously the candidate queue was sorted purely by publish time,
+ *      which meant the scarce MAX_NEW_ARTICLES_PER_REFRESH generation
+ *      slots could easily be consumed entirely by whichever entertainment
+ *      or viral story happened to publish most recently, starving out
+ *      exam-relevant stories that published a few hours earlier. This tier
+ *      is ONLY a sort order for the AI generation queue — it never filters
+ *      anything, and it is not the final relevance judgment. That job still
+ *      belongs entirely to the AI's examRelevance/importanceScore output,
+ *      applied afterward via MIN_IMPORTANCE_SCORE_TO_KEEP exactly as
+ *      before. Cache hits (stories already generated in a previous cycle)
+ *      are unaffected by this tier — they're free regardless of topic and
+ *      still get included every cycle if still recent (see
+ *      generateArticleCached, which only checks the budget on a genuine
+ *      cache miss).
+ *
  * The per-article AI cache (`generateArticleCached`, 3-day revalidate)
  * is unchanged and still uses Next's `unstable_cache` / Vercel Data
  * Cache — that part was never the problem, and reusing it means
@@ -79,12 +97,14 @@ import { readSnapshot, writeSnapshot, type Snapshot } from "./snapshot";
  * "5-10 articles, reliably": with a dedicated ~55s cron budget instead of
  * a shared page-load budget, one refresh cycle can now complete several
  * new Gemini generations (see NEW_ARTICLE_TIME_BUDGET_MS) rather than
- * ~1. Combined with the merge-not-replace snapshot logic, article count
- * accumulates across cycles (running every ~10 minutes) rather than
- * resetting, so the site should reach and hold MIN_DESIRED_ARTICLES
- * within the first hour after this ships, and indefinitely afterward as
- * long as RSS sources keep producing recent stories. MIN_DESIRED_ARTICLES
- * is a logging/health-check threshold only — it doesn't change filtering
+ * ~1. Combined with the merge-not-replace snapshot logic and the new
+ * priority-tier ordering (which spends those few generation slots on the
+ * stories most likely to actually matter), article count accumulates
+ * across cycles (running every ~10 minutes) rather than resetting, so the
+ * site should reach and hold MIN_DESIRED_ARTICLES within the first hour
+ * after this ships, and indefinitely afterward as long as RSS sources
+ * keep producing recent stories. MIN_DESIRED_ARTICLES is a
+ * logging/health-check threshold only — it doesn't change filtering
  * behavior — see /api/debug/news.
  */
 
@@ -117,6 +137,9 @@ const MIN_DESIRED_ARTICLES = Number(process.env.MIN_DESIRED_ARTICLES || 8);
 // How many *candidate* stories a single refresh even looks at. A sanity
 // cap on pool size, not a cost control — reused/cached articles are free
 // (zero Gemini calls). The real spend limiter is MAX_NEW_ARTICLES_PER_REFRESH.
+// Kept at 150: this is a cheap cache-hit lookup pool, not something that
+// touches Gemini, so there's no cost reason to shrink it — a bigger pool
+// just means more chances at free cache hits and more corroboration signal.
 const MAX_ARTICLES = Number(process.env.MAX_ARTICLES || 150);
 
 // At most this many stories are sent to Gemini for the FIRST time in a
@@ -126,6 +149,14 @@ const MAX_ARTICLES = Number(process.env.MAX_ARTICLES || 150);
 // attempts, never cache hits. A throw from that inner function is never
 // cached, so a skipped story is retried as an ordinary cache miss on the
 // next refresh cycle. No story is lost, just deferred.
+//
+// Kept at 5 rather than raised: the original "only one article" bug was
+// never really "5 is too few," it was that the wrong 5 stories were
+// getting the slots (whichever published most recently, regardless of
+// topic — see classifyPriorityTier below for the fix). Five well-chosen
+// exam-relevant generations per ~10-minute cycle is already ~30/hour of
+// new capacity, which combined with merge-based accumulation is enough
+// to reach and hold 8-15 articles without touching this number.
 const MAX_NEW_ARTICLES_PER_REFRESH = Number(process.env.MAX_NEW_ARTICLES_PER_REFRESH || 5);
 
 // A hard wall-clock deadline for how long a single refresh will wait on
@@ -143,7 +174,14 @@ const MAX_NEW_ARTICLES_PER_REFRESH = Number(process.env.MAX_NEW_ARTICLES_PER_REF
 // every cycle again.
 const NEW_ARTICLE_TIME_BUDGET_MS = Number(process.env.NEW_ARTICLE_TIME_BUDGET_MS || 42000);
 
-const AI_CONCURRENCY = 5; // bounds in-flight cache reads/promises; real Gemini call pacing is enforced in lib/ai.ts
+// Bounds in-flight cache reads/promises; real Gemini call pacing is
+// enforced in lib/ai.ts, not here. Raised from 5 to 10: since generation
+// calls are already serialized by Gemini's own min-spacing rule,
+// concurrency here doesn't buy more generation throughput — but it does
+// let cache-hit lookups (which never touch the rate limiter at all) churn
+// through the candidate pool faster, so free reuse from earlier cycles
+// surfaces sooner within the same wall-clock budget.
+const AI_CONCURRENCY = Number(process.env.AI_CONCURRENCY || 10);
 
 const BREAKING_WINDOW_MS = 24 * 60 * 60 * 1000;
 const TRENDING_WINDOW_MS = 48 * 60 * 60 * 1000;
@@ -190,6 +228,76 @@ function estimateReadingTimeSeconds(paragraphs: string[]): number {
   const words = paragraphs.join(" ").split(/\s+/).filter(Boolean).length;
   const WORDS_PER_SECOND = 3.3;
   return Math.max(20, Math.round(words / WORDS_PER_SECOND));
+}
+
+/**
+ * Lightweight, zero-cost pre-AI priority tier for candidate stories. This
+ * ONLY affects the order stories are offered to the (scarce,
+ * budget-limited) AI generation step in buildArticles() — it never
+ * filters anything out, and it is NOT the final relevance judgment. That
+ * job still belongs entirely to Gemini's examRelevance/importanceScore
+ * output (see lib/ai.ts), applied afterward via
+ * MIN_IMPORTANCE_SCORE_TO_KEEP exactly as before.
+ *
+ * Why this exists: when only MAX_NEW_ARTICLES_PER_REFRESH stories can be
+ * sent to Gemini for the first time in a cycle, and the candidate list
+ * was previously sorted purely by publish time, a handful of recently
+ * published entertainment/celebrity/viral stories could claim every
+ * available slot before a single Polity/Economy/IR story was even
+ * attempted — regardless of how exam-relevant that story ultimately would
+ * have scored. This function makes sure exam-relevant-looking stories are
+ * offered to AI generation first.
+ *
+ * Tier 3 = matches an exam-relevant keyword (Polity, Economy, IR,
+ *          Science & Tech, Environment, Defence, Awards/Reports/
+ *          Schemes/Committees/Bills, etc.)
+ * Tier 2 = no keyword match either way (general/unclassified news —
+ *          still eligible, just not fast-tracked ahead of tier 3)
+ * Tier 1 = matches an entertainment/lifestyle/celebrity/gossip keyword
+ *          — pushed to the back of the generation queue, never dropped
+ *          outright (a cache hit from a prior cycle, or the AI's own
+ *          scoring, can still surface it)
+ */
+const EXAM_RELEVANT_KEYWORDS = [
+  // Polity & Governance
+  "parliament", "lok sabha", "rajya sabha", "cabinet", "ministry", "ministr",
+  "bill", "ordinance", "amendment", "constitution", "president", "governor",
+  "supreme court", "high court", "verdict", "judgment", "election commission",
+  "cji", "chief justice", "tribunal",
+  // Economy
+  "rbi", "repo rate", "union budget", "gdp", "inflation", "fiscal deficit",
+  "economic survey", "niti aayog", "sebi", "monetary policy", "gst council",
+  "disinvestment", "forex reserves",
+  // International Relations
+  "summit", "bilateral", "united nations", "g20", "g7", "brics", "saarc",
+  "treaty", "un security council", "foreign minister", "diplomatic",
+  // Science & Technology
+  "isro", "drdo", "chandrayaan", "gaganyaan", "satellite launch",
+  "space mission", "nuclear", "artificial intelligence policy",
+  // Environment
+  "climate summit", "biodiversity", "wildlife sanctuary", "environment ministry",
+  "cop28", "cop29", "cop30", "forest cover",
+  // Defence
+  "indian army", "indian navy", "air force", "defence ministry",
+  "military exercise", "border security", "defence deal",
+  // Awards / Reports / Committees / Schemes
+  "nobel prize", "bharat ratna", "padma vibhushan", "padma bhushan", "padma shri",
+  "world bank report", "imf report", "committee report", "task force report",
+  "yojana", "scheme launched", "census"
+];
+
+const LOW_VALUE_KEYWORDS = [
+  "bollywood", "hollywood", "box office", "actress", "actor's", "celebrity",
+  "instagram post", "viral video", "horoscope", "fashion week", "wedding",
+  "engagement", "divorce", "reality show", "movie review", "trailer launch",
+  "song release", "music video", "ott release"
+];
+
+function classifyPriorityTier(item: FeedItem): number {
+  const h = item.headline.toLowerCase();
+  if (LOW_VALUE_KEYWORDS.some((k) => h.includes(k))) return 1;
+  if (EXAM_RELEVANT_KEYWORDS.some((k) => h.includes(k))) return 3;
+  return 2;
 }
 
 /**
@@ -369,9 +477,33 @@ async function buildArticles(): Promise<PipelineResult> {
   // 3. Cap to the most recent N unique stories before considering any of
   //    them for AI generation. Most of these will be cheap cache hits;
   //    MAX_NEW_ARTICLES_PER_REFRESH is what actually caps Gemini spend.
+  //
+  //    Sort order is priority tier FIRST (exam-relevant keywords ahead of
+  //    entertainment/lifestyle noise — see classifyPriorityTier), recency
+  //    SECOND within a tier. This is what determines which stories get
+  //    the scarce NEW-generation slots when MAX_NEW_ARTICLES_PER_REFRESH
+  //    is the binding constraint — cache hits are unaffected by this
+  //    order and are still included in full regardless of tier (see
+  //    generateArticleCached, which only checks the budget on a genuine
+  //    cache miss).
   const uniqueItems = Array.from(uniqueByFingerprint.values())
-    .sort((a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime())
+    .sort((a, b) => {
+      const tierDiff = classifyPriorityTier(b) - classifyPriorityTier(a);
+      if (tierDiff !== 0) return tierDiff;
+      return new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime();
+    })
     .slice(0, MAX_ARTICLES);
+
+  const tierCounts = uniqueItems.reduce(
+    (acc, i) => {
+      acc[classifyPriorityTier(i)]++;
+      return acc;
+    },
+    { 1: 0, 2: 0, 3: 0 } as Record<number, number>
+  );
+  console.log(
+    `[briefly] candidate pool by tier — high-value: ${tierCounts[3]}, neutral: ${tierCounts[2]}, low-value: ${tierCounts[1]}`
+  );
 
   console.log(
     `[briefly] ${uniqueItems.length} unique item(s) after dedupe/cap — reusing cached AI content where possible, ` +

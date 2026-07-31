@@ -14,7 +14,7 @@ import { refreshArticles } from "@/lib/data";
  * .github/workflows/refresh.yml, a free GitHub Actions scheduled
  * workflow. If this project ever moves to Vercel Pro, you can additionally
  * (or instead) register this same route in vercel.json's `crons` array
- * with a `*/10 * * * *` schedule — no code change needed, since Vercel's
+ * with an every-10-minute cron schedule — no code change needed, since Vercel's
  * own cron sends the same `Authorization: Bearer $CRON_SECRET` header
  * this route already checks for.
  */
