@@ -10,7 +10,7 @@ import { generateArticle, type GeneratedArticle } from "./ai";
  * homepage, category, article, search, /rss.xml, sitemap — is served from
  * one in-memory pipeline, rebuilt directly from the live sources:
  *
- *   RSS feeds -> dedupe -> AI summarize + Bengali translate -> cache -> render
+ *   RSS feeds -> dedupe -> AI summarize + exam-relevance judge -> cache -> render
  *
  * ---------------------------------------------------------------------
  * WHY THIS FILE LOOKS THE WAY IT DOES (read this before touching it)
@@ -65,23 +65,61 @@ import { generateArticle, type GeneratedArticle } from "./ai";
  *
  * On top of that, new AI generation is both budgeted (at most
  * MAX_NEW_ARTICLES_PER_REFRESH brand-new Gemini calls per refresh cycle)
- * and time-boxed (NEW_ARTICLE_TIME_BUDGET_MS shared wall-clock deadline),
- * so a refresh can never be stuck waiting on Gemini's pacing long enough
- * to blow Vercel Hobby's function timeout. Anything that doesn't finish
- * in time is simply deferred to the next 10-minute cycle — no story is
- * lost, and cached (previously generated) articles are unaffected by any
- * of this, since they resolve immediately with zero Gemini calls.
+ * and time-boxed (NEW_ARTICLE_TIME_BUDGET_MS shared wall-clock deadline,
+ * kept comfortably above lib/ai.ts's MIN_MS_BETWEEN_CALLS spacing so real
+ * generations aren't discarded before they can even start — see the note
+ * on NEW_ARTICLE_TIME_BUDGET_MS below), so a refresh can never be stuck
+ * waiting on Gemini's pacing long enough to blow Vercel Hobby's function
+ * timeout. Anything that doesn't finish in time is simply deferred to the
+ * next 10-minute cycle — no story is lost, and cached (previously
+ * generated) articles are unaffected by any of this, since they resolve
+ * immediately with zero Gemini calls.
+ *
+ * ---------------------------------------------------------------------
+ * EXAM-RELEVANCE RANKING AND FILTERING
+ * ---------------------------------------------------------------------
+ * Briefly's audience is competitive-exam aspirants (UPSC/WBCS/SSC/Banking/
+ * Railway/State PSC), not general news readers. lib/ai.ts asks Gemini to
+ * judge each story's exam relevance and assign an `importanceScore`
+ * (0-100). This file uses that score, not publish time, as the PRIMARY
+ * sort key for the article list — see `rankArticles()` below — and drops
+ * stories that score below MIN_IMPORTANCE_SCORE_TO_KEEP (routine
+ * entertainment/lifestyle/viral noise) unless they're independently
+ * newsworthy (breaking, or corroborated by several trusted sources).
+ *
+ * HONEST LIMITATION — "5-10 articles per category": with a 5
+ * requests/minute free Gemini quota, this pipeline can generate at most a
+ * handful of brand-new articles every 10-minute refresh (see
+ * MAX_NEW_ARTICLES_PER_REFRESH). Category depth is something that
+ * accumulates over hours via the 3-day per-article cache
+ * (AI_CACHE_REVALIDATE_SECONDS), not something achievable from a cold
+ * cache in one request. MAX_ARTICLES (the RSS candidate pool size) is set
+ * well above what one refresh could ever generate, specifically so that,
+ * as the per-article cache fills in over successive cycles, there's
+ * enough breadth of already-classified stories for every category to
+ * plausibly reach that depth over time. If a category consistently stays
+ * thin, that's a sign that RECENCY_WINDOW_MS or MAX_ARTICLES need
+ * widening further, or that TRUSTED_SOURCES needs a source that actually
+ * covers that topic — not something a request-time fix can solve.
  */
 
 const ARTICLE_LIST_REVALIDATE_SECONDS = 600; // 10 minutes — the site-wide refresh window
 const AI_CACHE_REVALIDATE_SECONDS = 60 * 60 * 24 * 3; // 3 days — per-article AI cache
-const RECENCY_WINDOW_MS = 48 * 60 * 60 * 1000; // ignore anything a feed returns older than this
+
+// How far back a story can be and still be considered. Widened from the
+// original 48h to 72h: exam aspirants care about "this week's" current
+// affairs, not just "today's" news, and a wider window gives the pipeline
+// more raw material to build category depth from across refresh cycles.
+const RECENCY_WINDOW_MS = 72 * 60 * 60 * 1000;
 
 // How many *candidate* stories we even look at per refresh. This is a
 // sanity cap on pool size, not a cost control — reused/cached articles
 // are free (zero Gemini calls). The real spend limiter is
-// MAX_NEW_ARTICLES_PER_REFRESH below.
-const MAX_ARTICLES = Number(process.env.MAX_ARTICLES || 40);
+// MAX_NEW_ARTICLES_PER_REFRESH below. Raised from 40 to 150: with 13
+// trusted feeds pooling into one 72-hour window, 40 was cutting the
+// candidate pool down before category diversity (govt/economy/science/
+// defence/etc, not just whatever's most recent) had a chance to show up.
+const MAX_ARTICLES = Number(process.env.MAX_ARTICLES || 150);
 
 // At most this many stories are ever sent to Gemini for the FIRST time in
 // a single refresh cycle. Checked/incremented *inside* the function passed
@@ -99,12 +137,34 @@ const MAX_NEW_ARTICLES_PER_REFRESH = Number(process.env.MAX_NEW_ARTICLES_PER_REF
 // treated as "not ready" for this cycle (skipped, retried next time) —
 // the underlying call may keep running in the background, but the
 // response is never blocked on it.
+//
+// MUST stay comfortably above lib/ai.ts's MIN_MS_BETWEEN_CALLS (the
+// minimum spacing enforced between actual outbound Gemini calls). Every
+// item in this refresh shares ONE outbound-call queue in lib/ai.ts, so
+// only the first item can start immediately — everything after it is
+// serialized behind MIN_MS_BETWEEN_CALLS. A deadline shorter than that
+// spacing guarantees every slot after the first is discarded every
+// cycle, and leaves the first slot with no room for ordinary latency.
+// 45s clears 13s of queue spacing plus normal Gemini round-trip time
+// (and the one allowed 429 retry) with real margin. If you raise
+// GEMINI_MIN_MS_BETWEEN_CALLS in lib/ai.ts, raise this too — it should
+// stay well above that value, not just barely over it.
 const NEW_ARTICLE_TIME_BUDGET_MS = Number(process.env.NEW_ARTICLE_TIME_BUDGET_MS || 45000);
 
 const AI_CONCURRENCY = 5; // bounds in-flight cache reads/promises; real Gemini call pacing is enforced in lib/ai.ts
 
 const BREAKING_WINDOW_MS = 24 * 60 * 60 * 1000;
 const TRENDING_WINDOW_MS = 48 * 60 * 60 * 1000;
+
+// Stories the AI scores below this are routine/trivial/entertainment
+// noise (see the examRelevance rules in lib/ai.ts) and are dropped from
+// the public site — UNLESS they're independently newsworthy (breaking,
+// or reported by several trusted sources at once, which is a strong
+// signal a "low-relevance-looking" story is actually a big national
+// moment the AI under-scored). This keeps the site focused on exam-useful
+// content without hard-coding a category blocklist.
+const MIN_IMPORTANCE_SCORE_TO_KEEP = Number(process.env.MIN_IMPORTANCE_SCORE_TO_KEEP || 20);
+const MIN_CORROBORATING_SOURCES_TO_OVERRIDE_LOW_SCORE = 3;
 
 function isWithin(publishedAt: string, windowMs: number): boolean {
   return Date.now() - new Date(publishedAt).getTime() <= windowMs;
@@ -140,6 +200,20 @@ function estimateReadingTimeSeconds(paragraphs: string[]): number {
   return Math.max(20, Math.round(words / WORDS_PER_SECOND));
 }
 
+/**
+ * Ranks by importance first (exam significance, as judged by the AI),
+ * recency second. Replaces the old "most recent first" sort: a Budget
+ * announcement from yesterday is more exam-relevant than a routine story
+ * from ten minutes ago, and this is what actually delivers "rank by
+ * importance, not only publication time."
+ */
+function rankArticles(articles: Article[]): Article[] {
+  return [...articles].sort((a, b) => {
+    if (b.importanceScore !== a.importanceScore) return b.importanceScore - a.importanceScore;
+    return new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime();
+  });
+}
+
 /** Thrown (and never cached) when this refresh has already spent its new-generation budget. */
 class GenerationBudgetExceeded extends Error {}
 
@@ -153,7 +227,7 @@ type GenerationOutcome =
 
 /**
  * Generates (or reuses a cached generation of) one article's AI summary +
- * Bengali translation.
+ * Bengali translation + exam-relevance judgment.
  *
  * - Cache HIT (already generated within AI_CACHE_REVALIDATE_SECONDS):
  *   resolves immediately, zero Gemini calls, budget/deadline irrelevant.
@@ -276,7 +350,8 @@ async function buildArticles(): Promise<Article[]> {
   //    distinct sources reported a near-identical headline. With no
   //    database of clicks/views to rank on, that corroboration count
   //    (2+ independent trusted sources covering the same story) is used
-  //    below as the "trending" signal instead.
+  //    below both as the "trending" signal and as a safety net that can
+  //    pull a story back in even if the AI scored it as low-importance.
   const uniqueByFingerprint = new Map<string, FeedItem>();
   const corroboratingSources = new Map<string, Set<string>>(); // normalized headline -> sources
 
@@ -310,7 +385,7 @@ async function buildArticles(): Promise<Article[]> {
   const newArticleBudget = { count: 0 };
   const deadlineMs = Date.now() + NEW_ARTICLE_TIME_BUDGET_MS;
 
-  const counts = { hit: 0, generated: 0, skippedBudget: 0, skippedDeadline: 0, failed: 0 };
+  const counts = { hit: 0, generated: 0, skippedBudget: 0, skippedDeadline: 0, failed: 0, droppedLowValue: 0 };
 
   const generated = await mapWithConcurrency(uniqueItems, AI_CONCURRENCY, async (item): Promise<Article | null> => {
     const fp = fingerprint(item);
@@ -335,9 +410,21 @@ async function buildArticles(): Promise<Article[]> {
     }
 
     const ai = outcome.article;
-    const slugBase = slugify(ai.headline || item.headline);
     const normalized = normalizeHeadline(item.headline);
     const sourcesReporting = corroboratingSources.get(normalized)?.size ?? 1;
+
+    // Exam-relevance gate: routine/entertainment/trivial stories are
+    // dropped, unless the story is independently newsworthy (breaking, or
+    // corroborated by several trusted sources — a sign the AI likely
+    // under-scored something that's actually a big national moment).
+    const isLowValue = ai.importanceScore < MIN_IMPORTANCE_SCORE_TO_KEEP;
+    const hasIndependentSignal = ai.isBreaking || sourcesReporting >= MIN_CORROBORATING_SOURCES_TO_OVERRIDE_LOW_SCORE;
+    if (isLowValue && !hasIndependentSignal) {
+      counts.droppedLowValue++;
+      return null;
+    }
+
+    const slugBase = slugify(ai.headline || item.headline);
 
     return {
       id: fp,
@@ -356,19 +443,25 @@ async function buildArticles(): Promise<Article[]> {
       readingTimeSeconds: estimateReadingTimeSeconds(ai.summaryEn),
       isBreaking: ai.isBreaking,
       isTrending: sourcesReporting >= 2,
-      tags: ai.tags
+      tags: ai.tags,
+      examRelevance: ai.examRelevance,
+      importanceScore: ai.importanceScore,
+      keyFacts: ai.keyFacts,
+      organizations: ai.organizations,
+      importantDates: ai.importantDates,
+      whyItMatters: ai.whyItMatters,
+      possibleExamQuestion: ai.possibleExamQuestion || undefined,
+      prelimsFacts: ai.prelimsFacts.length > 0 ? ai.prelimsFacts : undefined
     };
   });
 
-  const articles = generated
-    .filter((a): a is Article => a !== null)
-    .sort((a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime());
+  const articles = rankArticles(generated.filter((a): a is Article => a !== null));
 
   console.log(
     `[briefly] list rebuild complete — ${articles.length}/${uniqueItems.length} article(s) available ` +
       `(cache hits: ${counts.hit}, newly generated: ${counts.generated}, ` +
       `skipped — budget: ${counts.skippedBudget}, skipped — deadline: ${counts.skippedDeadline}, ` +
-      `failed: ${counts.failed})`
+      `failed: ${counts.failed}, dropped — low exam-relevance: ${counts.droppedLowValue})`
   );
 
   if (articles.length === 0) {
@@ -450,12 +543,18 @@ export async function getTrendingArticles(): Promise<Article[]> {
   return all.filter((a) => a.isTrending && isWithin(a.publishedAt, TRENDING_WINDOW_MS));
 }
 
+/** High exam-relevance articles, already ranked by importance — the "Today's Brief" candidate set. */
+export async function getHighExamRelevanceArticles(): Promise<Article[]> {
+  const all = await getArticles();
+  return all.filter((a) => a.examRelevance === "High");
+}
+
 export async function searchArticles(query: string): Promise<Article[]> {
   const all = await getArticles();
   const q = query.trim().toLowerCase();
   if (!q) return [];
   return all.filter((a) =>
-    [a.headline, a.headlineBn, a.category, a.source, ...a.tags]
+    [a.headline, a.headlineBn, a.category, a.source, ...a.tags, ...a.organizations]
       .join(" ")
       .toLowerCase()
       .includes(q)

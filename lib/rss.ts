@@ -39,18 +39,16 @@ import Parser from "rss-parser";
  *   Fixed to `Regid=1` and to the `www.` host, which is what that listing
  *   page itself links to. (2) Separately, pib.gov.in sits behind a
  *   government WAF that intermittently 403s requests from datacenter/cloud
- *   IP ranges (Vercel included) regardless of URL correctness or headers —
- *   this is not something fixable from application code. It's kept in the
- *   list because it's a legitimate official source and the per-feed error
- *   handling below already isolates any 403 to just this one feed; if it's
- *   consistently blocked from your deployment region, that's expected
- *   platform-level blocking, not a bug here.
+ *   IP ranges (Vercel included, and apparently some residential ISPs too)
+ *   regardless of URL correctness or headers — not fixable from
+ *   application code. It's kept in the list because it's a legitimate
+ *   official source and the per-feed error handling below already
+ *   isolates any 403 to just this one feed.
  *
- * - News18: was blocked outright (403) from this deployment's egress IPs,
- *   independent of URL correctness — same class of issue as PIB above, but
- *   with no first-party fallback URL to try. Replaced with LiveMint (Mint),
- *   a comparable licensed, actively-maintained Indian business/general news
- *   RSS feed, as a working like-for-like substitute.
+ * - News18: was blocked outright (403) from cloud egress IPs, independent
+ *   of URL correctness — same class of issue as PIB above, but with no
+ *   first-party fallback URL to try. Replaced with LiveMint (Mint), a
+ *   comparable licensed, actively-syndicated Indian source.
  */
 export const TRUSTED_SOURCES = [
   { name: "Reuters World News", url: "https://reutersbest.com/region/global/feed/", source: "Reuters" },
@@ -68,31 +66,32 @@ export const TRUSTED_SOURCES = [
   { name: "Google News - World", url: "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en", source: "Google News" }
 ];
 
+const REQUEST_TIMEOUT_MS = 15000;
+const FEED_REQUEST_HEADERS = {
+  "User-Agent": "Mozilla/5.0 (compatible; BrieflyNewsBot/1.0; +https://briefly.news)",
+  Accept: "application/rss+xml, application/xml, text/xml, */*",
+  "Accept-Language": "en-IN,en;q=0.9"
+};
+
 // Some feeds (Reuters, PIB) reject requests with no/unusual User-Agent
 // headers, which rss-parser doesn't set by default — that request then
 // rejects and, before this file was instrumented, vanished silently
-// inside Promise.allSettled with no log line anywhere. The fuller set of
-// browser-like headers below (Accept/Accept-Language, not just
-// User-Agent) reduces — but, per the notes above, can't fully eliminate —
-// bot-detection 403s from sites that specifically block datacenter IP
-// ranges rather than inspecting headers.
+// inside Promise.allSettled with no log line anywhere.
 //
-// `xml2js: { strict: false }` makes the underlying XML parser tolerant of
-// minor malformed markup (e.g. an attribute without a value, which is
-// what was breaking Hindustan Times's feed at a specific line/column).
-// Strict mode throws on the first such deviation and aborts that feed
-// entirely; non-strict mode recovers and still extracts the items.
+// IMPORTANT: do NOT pass `xml2js: { strict: false }` here. That was tried
+// to make parsing tolerant of malformed feeds (Hindustan Times specifically)
+// and it broke EVERY feed instead of just that one: `strict: false` switches
+// the underlying `sax` parser into HTML-compatibility mode, where `<link>`
+// is treated as a void/self-closing element (as it is in an HTML <head>).
+// Every RSS/Atom feed uses non-empty `<link>...</link>` elements constantly,
+// so that mode corrupts the parse tree for essentially all real-world feeds,
+// not just malformed ones — which is exactly what caused all 13 feeds to
+// fail with "not recognized as RSS 1 or 2" at once. Malformed-XML recovery
+// is handled below instead, as a narrow, per-feed, best-effort fallback in
+// `fetchFeed()`, so it can't degrade the feeds that were already fine.
 const parser = new Parser({
-  headers: {
-    "User-Agent": "Mozilla/5.0 (compatible; BrieflyNewsBot/1.0; +https://briefly.news)",
-    Accept: "application/rss+xml, application/xml, text/xml, */*",
-    "Accept-Language": "en-IN,en;q=0.9"
-  },
-  timeout: 15000,
-  xml2js: {
-    strict: false,
-    trim: true
-  },
+  headers: FEED_REQUEST_HEADERS,
+  timeout: REQUEST_TIMEOUT_MS,
   customFields: {
     item: [["media:content", "media"], ["media:thumbnail", "thumbnail"]]
   }
@@ -123,14 +122,69 @@ export interface FeedResult {
 }
 
 /**
+ * Best-effort recovery for feeds with small, mechanical XML malformations
+ * (e.g. Hindustan Times shipping a bare attribute with no `="value"`, which
+ * trips up strict XML parsing at that exact line/column). Only called when
+ * normal strict parsing has already failed for a feed — never runs on a
+ * feed that parses fine, so it can't introduce a regression the way a
+ * parser-wide leniency setting did (see the note on `parser` above).
+ *
+ * Strategy: re-fetch the raw XML ourselves, strip any attribute token that
+ * isn't a well-formed `name="value"` / `name='value'` pair, and retry
+ * strict parsing on the cleaned string. If any step fails, returns null and
+ * the caller falls back to surfacing the original parse error — this
+ * function can only help, never make things worse.
+ */
+async function trySanitizedFallback(url: string): Promise<any | null> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    let raw: string;
+    try {
+      const res = await fetch(url, { headers: FEED_REQUEST_HEADERS, signal: controller.signal });
+      if (!res.ok) return null;
+      raw = await res.text();
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    const sanitized = raw.replace(
+      /<([a-zA-Z][\w:.-]*)((?:\s+[^<>]*)?)(\/?)>/g,
+      (full: string, tagName: string, rawAttrs: string, selfClose: string) => {
+        if (!rawAttrs || !rawAttrs.trim()) return full;
+        // Drop any attribute-looking token that isn't followed by `=` — a
+        // bare word like `alt` in `<img src="x" alt>` is what "Attribute
+        // without value" means; the value itself isn't something we use
+        // downstream (we only read text content and a handful of known
+        // attrs like media:content's url), so dropping it is safe.
+        const cleanedAttrs = rawAttrs.replace(/(^|\s)([\w:.-]+)(?!\s*=)(?=\s|$)/g, "$1");
+        return `<${tagName}${cleanedAttrs}${selfClose ? "/" : ""}>`;
+      }
+    );
+
+    return await parser.parseString(sanitized);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Fetches and normalizes a single trusted RSS feed.
  * Never returns full article bodies — RSS <description>/<summary> fields
  * only, which publishers explicitly expose for syndication/preview use.
  */
 export async function fetchFeed(feed: (typeof TRUSTED_SOURCES)[number]): Promise<FeedItem[]> {
-  const parsed = await parser.parseURL(feed.url);
+  let parsed;
+  try {
+    parsed = await parser.parseURL(feed.url);
+  } catch (err) {
+    const recovered = await trySanitizedFallback(feed.url);
+    if (!recovered) throw err; // sanitization couldn't help — surface the original error
+    console.warn(`[briefly:rss] ${feed.name} — recovered via malformed-XML sanitization fallback (original error: ${(err as Error).message})`);
+    parsed = recovered;
+  }
 
-  return (parsed.items ?? []).map((item) => ({
+  return (parsed.items ?? []).map((item: any) => ({
     headline: item.title ?? "",
     description: stripHtml(item.contentSnippet ?? item.content ?? item.summary ?? ""),
     sourceUrl: item.link ?? "",
@@ -148,12 +202,7 @@ export async function fetchFeed(feed: (typeof TRUSTED_SOURCES)[number]): Promise
  * shape, malformed markup — never rejects the outer Promise.all and never
  * throws out of this function. It's simply recorded as `status: "error"`
  * in `feedResults` and contributes zero items; every other feed's items
- * are still returned. This was already true before this change; what's
- * new is that fewer feeds actually need to hit this path now (see the
- * TRUSTED_SOURCES notes above), and the ones still likely to occasionally
- * (PIB, and any future WAF-protected source) no longer take the whole
- * rebuild down with them — same as always, just documented explicitly
- * here since it's the mechanism this file is being asked to guarantee.
+ * are still returned.
  */
 export async function fetchAllTrustedFeeds(): Promise<{ items: FeedItem[]; feedResults: FeedResult[] }> {
   const feedResults: FeedResult[] = [];
