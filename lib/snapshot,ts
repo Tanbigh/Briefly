@@ -1,0 +1,108 @@
+import { Redis } from "@upstash/redis";
+import type { Article } from "./types";
+import type { FeedResult } from "./rss";
+
+/**
+ * Persistent "latest good snapshot" store — the entire piece of state
+ * this app keeps outside of Redis's per-article/list caches.
+ *
+ * ---------------------------------------------------------------------
+ * WHY UPSTASH REDIS (and not Vercel Blob, and not "a database")
+ * ---------------------------------------------------------------------
+ * The access pattern here is exactly "one JSON value, overwritten in
+ * place, read back by a fixed key" — a plain GET/SET. Upstash Redis's
+ * REST API matches that 1:1 (`redis.get(key)` / `redis.set(key, value)`).
+ * Vercel Blob's `put()` is built around content-addressed/immutable
+ * writes — by default every `put()` gets a new URL, and reading "the
+ * current value" back later means either tracking that URL yourself or
+ * calling `list()` and picking the right blob. That's solvable, but it's
+ * extra bookkeeping for a problem Redis already solves with one command.
+ *
+ * It's also the direct successor to "just use Vercel KV": Vercel KV is
+ * deprecated, and any existing KV store was automatically migrated to
+ * Upstash Redis, with new projects pointed at the Upstash integration in
+ * the Vercel Marketplace. So provisioning this is: Vercel dashboard ->
+ * Storage -> Marketplace -> Upstash Redis -> Connect to this project.
+ * That single click injects the env vars this file reads, below. Free
+ * tier (10k commands/day, 256MB) is far more than one small JSON blob
+ * refreshed every ~10 minutes will ever use.
+ *
+ * This is still "no database" in the sense the rest of this codebase
+ * means it: there is exactly ONE key (`SNAPSHOT_KEY`) holding one JSON
+ * document. No tables, no schema, no migrations, nothing relational.
+ */
+
+const SNAPSHOT_KEY = "briefly:latest-snapshot";
+
+// Support both env var naming conventions: UPSTASH_REDIS_REST_* is what
+// Upstash's own docs/CLI use; KV_REST_API_* is what older "Vercel KV"
+// integrations (now backed by Upstash under the hood) still inject on
+// some projects. Whichever pair is present, we use it.
+const url = process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL;
+const token = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN;
+
+let redis: Redis | null = null;
+if (url && token) {
+  redis = new Redis({ url, token });
+} else {
+  console.error(
+    "[briefly:snapshot] No Redis credentials found (expected UPSTASH_REDIS_REST_URL/" +
+      "UPSTASH_REDIS_REST_TOKEN, or KV_REST_API_URL/KV_REST_API_TOKEN). Provision Upstash " +
+      "Redis from the Vercel dashboard (Storage -> Marketplace -> Upstash Redis) and " +
+      "redeploy. Until then, getArticles() returns an empty list and /api/cron/refresh " +
+      "cannot persist results."
+  );
+}
+
+export interface Snapshot {
+  articles: Article[];
+  generatedAt: string; // ISO timestamp of this successful refresh
+  feedResults: FeedResult[];
+  counts: {
+    hit: number;
+    generated: number;
+    skippedBudget: number;
+    skippedDeadline: number;
+    failed: number;
+    droppedLowValue: number;
+  };
+  refreshDurationMs: number;
+}
+
+// A small in-memory layer in front of Redis, scoped to one warm
+// serverless instance/process. Not needed for correctness — it exists so
+// that (a) a burst of page loads hitting the same warm instance costs one
+// Redis command instead of N, keeping us comfortably inside Upstash's
+// free daily command quota, and (b) a transient Redis error still has
+// something to fall back to for a little while, instead of every page
+// immediately rendering an empty homepage.
+const MEMORY_TTL_MS = 60_000;
+let memoryCache: { value: Snapshot | null; expiresAt: number } | null = null;
+
+export async function readSnapshot(): Promise<Snapshot | null> {
+  if (memoryCache && memoryCache.expiresAt > Date.now()) {
+    return memoryCache.value;
+  }
+
+  if (!redis) return memoryCache?.value ?? null;
+
+  try {
+    const value = await redis.get<Snapshot>(SNAPSHOT_KEY);
+    memoryCache = { value: value ?? null, expiresAt: Date.now() + MEMORY_TTL_MS };
+    return value ?? null;
+  } catch (err) {
+    console.error(`[briefly:snapshot] Redis read failed: ${(err as Error).message}`);
+    // Serve the last value we had in memory (even if its TTL just
+    // expired) rather than nothing — a few-minutes-stale list beats an
+    // empty homepage during a transient Redis blip.
+    return memoryCache?.value ?? null;
+  }
+}
+
+export async function writeSnapshot(snapshot: Snapshot): Promise<void> {
+  if (!redis) {
+    throw new Error("Cannot persist snapshot: no Redis credentials configured");
+  }
+  await redis.set(SNAPSHOT_KEY, snapshot);
+  memoryCache = { value: snapshot, expiresAt: Date.now() + MEMORY_TTL_MS };
+}

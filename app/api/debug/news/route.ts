@@ -1,71 +1,65 @@
-import { NextRequest, NextResponse } from "next/server";
-import { fetchAllTrustedFeeds } from "@/lib/rss";
-import { getArticles } from "@/lib/data";
-
-export const dynamic = "force-dynamic";
-// See app/page.tsx for why this is raised.
-export const maxDuration = 300;
+import { NextResponse } from "next/server";
+import { readSnapshot } from "@/lib/snapshot";
 
 /**
- * Diagnostics for the no-database, RSS -> AI -> cache pipeline.
+ * Human-facing health check: "is the site actually fresh, and if not,
+ * which feed is the problem and why." Reads the persisted snapshot only
+ * — never touches RSS or Gemini, so checking this never itself burns
+ * request budget or Gemini quota.
  *
- * There's no IngestLog table and no DB to query anymore — everything
- * this route reports comes from the same two things every page uses:
- * the cached article list (`getArticles()`) and, optionally, a live
- * read-only RSS pull. That means this endpoint can never drift from
- * what readers are actually seeing.
- *
- * Usage:
- *   curl -H "Authorization: Bearer $CRON_SECRET" https://your-site/api/debug/news
- *   curl -H "Authorization: Bearer $CRON_SECRET" "https://your-site/api/debug/news?live=true"
+ * Optionally gated by DEBUG_SECRET (?key=...) if you set that env var.
+ * If it's unset, this endpoint is open — it only exposes feed health and
+ * article counts, nothing sensitive — but set DEBUG_SECRET if you'd
+ * rather keep it private.
  */
-export async function GET(request: NextRequest) {
-  const auth = request.headers.get("authorization");
-  if (process.env.CRON_SECRET && auth !== `Bearer ${process.env.CRON_SECRET}`) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
 
-  const wantsLiveCheck = new URL(request.url).searchParams.get("live") === "true";
-  const response: Record<string, unknown> = { ok: true, checkedAt: new Date().toISOString() };
+export const dynamic = "force-dynamic";
 
-  try {
-    const articles = await getArticles();
-    const newest = articles[0]?.publishedAt ?? null;
-    response.cachedArticles = {
-      total: articles.length,
-      newestPublishedAt: newest,
-      hoursSinceNewest: newest ? Number(((Date.now() - new Date(newest).getTime()) / 3_600_000).toFixed(1)) : null,
-      breakingCount: articles.filter((a) => a.isBreaking).length,
-      trendingCount: articles.filter((a) => a.isTrending).length,
-      sample: articles.slice(0, 5).map((a) => ({
-        slug: a.slug,
-        headline: a.headline,
-        source: a.source,
-        publishedAt: a.publishedAt,
-        isBreaking: a.isBreaking,
-        isTrending: a.isTrending
-      }))
-    };
-  } catch (err) {
-    response.ok = false;
-    response.cachedArticles = { error: (err as Error).message };
-  }
-
-  if (wantsLiveCheck) {
-    try {
-      const { items, feedResults } = await fetchAllTrustedFeeds();
-      response.liveFeedCheck = {
-        requestedAt: new Date().toISOString(),
-        totalItemsFetched: items.length,
-        feedResults
-      };
-    } catch (err) {
-      response.liveFeedCheck = { error: (err as Error).message };
+export async function GET(request: Request) {
+  const debugSecret = process.env.DEBUG_SECRET;
+  if (debugSecret) {
+    const key = new URL(request.url).searchParams.get("key");
+    if (key !== debugSecret) {
+      return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
     }
-  } else {
-    response.liveFeedCheck =
-      "Not requested — add ?live=true to fetch every trusted feed right now, read-only, no cache writes.";
   }
 
-  return NextResponse.json(response, { headers: { "Cache-Control": "no-store, must-revalidate" } });
+  const snapshot = await readSnapshot();
+
+  if (!snapshot) {
+    return NextResponse.json({
+      ok: false,
+      status: "no snapshot yet",
+      hint:
+        "Either /api/cron/refresh has never completed successfully, or Redis isn't " +
+        "configured (check UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN). Try " +
+        "triggering /api/cron/refresh manually with your CRON_SECRET."
+    });
+  }
+
+  const ageMs = Date.now() - new Date(snapshot.generatedAt).getTime();
+  const feedsOk = snapshot.feedResults.filter((f) => f.status === "ok");
+  const feedsFailing = snapshot.feedResults.filter((f) => f.status === "error");
+
+  return NextResponse.json({
+    ok: true,
+    lastRefreshAt: snapshot.generatedAt,
+    lastRefreshAgeMinutes: Math.round(ageMs / 60000),
+    lastRefreshDurationMs: snapshot.refreshDurationMs,
+    articleCount: snapshot.articles.length,
+    generationCounts: snapshot.counts,
+    feeds: {
+      okCount: feedsOk.length,
+      failingCount: feedsFailing.length,
+      total: snapshot.feedResults.length,
+      details: snapshot.feedResults.map((f) => ({
+        name: f.name,
+        status: f.status,
+        itemCount: f.itemCount,
+        newestItemAt: f.newestItemAt,
+        durationMs: f.durationMs,
+        error: f.error
+      }))
+    }
+  });
 }
