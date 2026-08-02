@@ -1,54 +1,59 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { refreshArticles } from "@/lib/data";
 
 /**
- * The ONLY route that runs the live RSS + AI pipeline. Every page (home,
- * category, article, search, /rss.xml, sitemap) just reads the snapshot
- * this route produces — see the top of lib/data.ts for the full reasoning.
+ * REFERENCE FILE — compare against your actual app/api/cron/refresh/route.ts.
  *
- * WHY THIS ISN'T A VERCEL-NATIVE CRON JOB ON HOBBY:
- * Vercel's built-in Cron Jobs are capped at once-per-day on the Hobby
- * plan — any more frequent schedule fails at deploy time. That's much too
- * slow for a news site. So this stays a plain authenticated API route,
- * and something OUTSIDE Vercel calls it every ~10 minutes instead — see
- * .github/workflows/refresh.yml, a free GitHub Actions scheduled
- * workflow. If this project ever moves to Vercel Pro, you can additionally
- * (or instead) register this same route in vercel.json's `crons` array
- * with an every-10-minute cron schedule — no code change needed, since Vercel's
- * own cron sends the same `Authorization: Bearer $CRON_SECRET` header
- * this route already checks for.
+ * This is not a confirmed fix. It's a known-correct implementation of the
+ * contract that lib/data.ts already documents and depends on:
+ *   - refreshArticles() is called from exactly here, nowhere else
+ *   - this route owns a dedicated 60s budget (Vercel Hobby's ceiling),
+ *     not shared with any page request
+ *   - callers are authorized with `Authorization: Bearer <CRON_SECRET>`
+ *   - the response body surfaces refreshArticles()'s full RefreshResult
+ *     (ok/reason/counts/feedResults) so the calling GitHub Action's log
+ *     tells you exactly what happened without needing Vercel's dashboard
+ *
+ * If your real file differs in any of these ways, that's very likely
+ * where the pipeline is actually breaking:
+ *   - Wrong/missing `export const maxDuration = 60` -> Vercel kills the
+ *     function at the platform default (10s) before Gemini calls finish.
+ *   - Wrong/missing `export const dynamic = "force-dynamic"` -> Next may
+ *     try to statically evaluate this route at build time.
+ *   - Auth check comparing to the wrong env var, or expecting the secret
+ *     in a query param instead of the Authorization header (or vice
+ *     versa) -> every call 401/403s before refreshArticles() ever runs.
  */
 
 export const dynamic = "force-dynamic";
-// Vercel Hobby's maximum. This is dedicated entirely to this one job —
-// no page request shares it — which is what actually fixes the
-// "only one article" problem. See lib/data.ts's NEW_ARTICLE_TIME_BUDGET_MS.
-export const maxDuration = 60;
+export const maxDuration = 60; // Vercel Hobby plan's ceiling — dedicated entirely to this job
 
-function isAuthorized(request: Request): boolean {
-  const secret = process.env.CRON_SECRET;
-  if (!secret) {
-    // Fail closed: an unset secret must never be silently treated as
-    // "anyone may trigger this." Set CRON_SECRET in your environment —
-    // any long random string works; GitHub Actions and (if used) Vercel
-    // Cron both send it as a Bearer token.
-    console.error("[briefly:cron] CRON_SECRET is not set — refusing all requests until it is configured");
-    return false;
-  }
-  return request.headers.get("authorization") === `Bearer ${secret}`;
-}
+export async function GET(request: NextRequest) {
+  const expected = process.env.CRON_SECRET;
 
-export async function GET(request: Request) {
-  if (!isAuthorized(request)) {
-    return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  if (!expected) {
+    console.error("[briefly:cron] CRON_SECRET is not set on this deployment — refusing all requests");
+    return NextResponse.json({ ok: false, reason: "CRON_SECRET not configured on server" }, { status: 500 });
   }
 
-  const result = await refreshArticles();
+  const authHeader = request.headers.get("authorization");
+  if (authHeader !== `Bearer ${expected}`) {
+    console.warn("[briefly:cron] rejected request with missing/invalid Authorization header");
+    return NextResponse.json({ ok: false, reason: "Unauthorized" }, { status: 401 });
+  }
 
-  // 200 = wrote a new/merged snapshot. 207 = pipeline ran but the
-  // previous snapshot was intentionally left untouched (see
-  // refreshArticles' "never replace with empty/partial" rule) — this is
-  // an expected, non-alarming outcome, not a 500, but it's still useful
-  // to distinguish from a clean success in logs/monitoring.
-  return NextResponse.json(result, { status: result.ok ? 200 : 207 });
+  try {
+    const result = await refreshArticles();
+    return NextResponse.json(result, { status: result.ok ? 200 : 200 });
+    // Note: deliberately 200 even when result.ok === false. A "pipeline
+    // ran but produced 0 new articles this cycle" is an expected, logged
+    // outcome (see data.ts), not a transport-level failure — the calling
+    // GitHub Action should only red-X on genuine errors (auth, timeout,
+    // unhandled exception), which the catch block below still surfaces
+    // as a non-2xx.
+  } catch (err) {
+    const message = (err as Error).message;
+    console.error(`[briefly:cron] unhandled error in refreshArticles(): ${message}`);
+    return NextResponse.json({ ok: false, reason: message }, { status: 500 });
+  }
 }
