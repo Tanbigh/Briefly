@@ -5,6 +5,21 @@ name: Fetch News
 # Hobby plan only allows once-per-day cron jobs. Running the scheduler
 # here instead means the site keeps publishing new stories every 10
 # minutes regardless of hosting plan.
+#
+# IMPORTANT: this workflow does NOT run the RSS/AI pipeline itself.
+# lib/data.ts's refreshArticles() is only ever called from ONE place:
+# the deployed app/api/cron/refresh route on Vercel, which already has
+# GEMINI_API_KEY / UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN
+# configured as Vercel project env vars and its own maxDuration=60
+# budget. This job's only job is to hit that endpoint on a schedule,
+# with the CRON_SECRET it expects, and fail loudly (red X in Actions)
+# if it doesn't come back 2xx — instead of silently going stale.
+#
+# Required GitHub Actions secrets (Settings -> Secrets and variables ->
+# Actions), NOT the same as the Vercel project's env vars:
+#   SITE_URL     e.g. https://briefly.vercel.app (your deployed domain)
+#   CRON_SECRET  must match the CRON_SECRET set in Vercel's project
+#                env vars, so the route's auth check accepts this call
 
 on:
   schedule:
@@ -15,12 +30,32 @@ jobs:
   ingest:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-      - run: npm ci
-      - run: npm run fetch-news
+      - name: Trigger /api/cron/refresh
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SITE_URL: ${{ secrets.SITE_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${SITE_URL:-}" ]; then
+            echo "::error::SITE_URL secret is not set (Settings -> Secrets and variables -> Actions)"
+            exit 1
+          fi
+          if [ -z "${CRON_SECRET:-}" ]; then
+            echo "::error::CRON_SECRET secret is not set (Settings -> Secrets and variables -> Actions)"
+            exit 1
+          fi
+
+          http_status=$(curl -sS -o response.json -w "%{http_code}" \
+            --max-time 90 \
+            -H "Authorization: Bearer ${CRON_SECRET}" \
+            "${SITE_URL%/}/api/cron/refresh")
+
+          echo "HTTP status: ${http_status}"
+          echo "Response body:"
+          cat response.json || true
+
+          if [ "$http_status" -lt 200 ] || [ "$http_status" -ge 300 ]; then
+            echo "::error::/api/cron/refresh returned HTTP ${http_status}"
+            exit 1
+          fi
