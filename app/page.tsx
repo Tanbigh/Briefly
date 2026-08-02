@@ -8,10 +8,25 @@ import { getArticles, getBreakingArticle, getTrendingArticles } from "@/lib/data
 // Same reasoning as app/article/[slug]/page.tsx: this is a database-free,
 // RSS-driven site, and Next.js would otherwise try to statically generate
 // this route at `next build` time — before the build has network access to
-// RSS/the Gemini API in most CI/deploy setups. Render on demand instead;
-// getArticles() is already cached internally via unstable_cache.
+// RSS/the Gemini API in most CI/deploy setups. Render on demand instead.
+//
+// IMPORTANT: `dynamic = "force-dynamic"` only disables the Full Route
+// Cache (the rendered HTML) — it does NOT disable the separate Data
+// Cache that Next.js applies to individual fetch() calls made during
+// the render, including ones made internally by third-party SDKs.
+// getArticles() -> readSnapshot() -> lib/snapshot.ts calls
+// @upstash/redis, whose REST client is fetch()-based; since that
+// request always hits the same URL (a constant key), Next.js's default
+// fetch caching was serving the FIRST-EVER response to that request
+// forever, no matter how many times this page re-rendered or how many
+// times /api/cron/refresh wrote a new snapshot. `fetchCache =
+// "force-no-store"` forces every fetch in this route segment,
+// including that one, to always hit the network.
+// (See vercel/next.js#64145 and #75370 — "force-dynamic does not opt
+// out of the data cache" is confirmed Next.js behavior, not a bug in
+// this codebase specifically.)
 export const dynamic = "force-dynamic";
-export const revalidate = 120;
+export const fetchCache = "force-no-store";
 // Generating MAX_ARTICLES articles under Gemini's free-tier rate limit takes
 // roughly MAX_ARTICLES * 13 seconds (see lib/data.ts and lib/ai.ts). Raise
 // Vercel's default function timeout so a full rebuild has room to finish.

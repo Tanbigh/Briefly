@@ -6,8 +6,15 @@ import { CATEGORY_LIST } from "@/lib/site-data";
 // RSS-driven site, and Next.js would otherwise try to statically generate
 // this route at `next build` time — before the build has network access to
 // RSS/the Gemini API in most CI/deploy setups, and before any of today's
-// articles exist. Render it on demand instead, cached like every other page.
+// articles exist. Render it on demand instead.
+//
+// See app/page.tsx for why `fetchCache = "force-no-store"` is required
+// alongside `dynamic = "force-dynamic"` — without it, getArticles()'s
+// underlying Redis read (fetch-based, via @upstash/redis) gets served
+// from Next's Data Cache indefinitely, independent of how often this
+// route itself re-renders.
 export const dynamic = "force-dynamic";
+export const fetchCache = "force-no-store";
 // See app/page.tsx for why this is raised.
 export const maxDuration = 300;
 
